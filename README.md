@@ -12,7 +12,7 @@ extension/          ← the extension itself (load this folder / zip this folder
   src/content/guard-main.js   wraps window.open() etc. inside the page (MAIN world)
   src/content/guard.js        click/submit guard, cosmetic filter, toast (isolated world)
   src/content/cosmetic.js     CSS selectors for ad containers
-  src/content/overlay.js      on-screen popup closer (modals, cookie walls, click traps)
+  src/content/overlay.js      on-screen popup closer (modals, cookie walls, click traps, layers over embedded players)
   rules/ads.json, rules/trackers.json   generated network rules
   pages/              toolbar popup, settings, last-resort "blocked" page
 filters/ads.txt, filters/trackers.txt   ← edit these to change what is blocked
@@ -50,7 +50,7 @@ Nothing is blocked by one trick alone. There are five layers, from earliest to l
 | 3 | **Click guard** | `guard.js` | Cancels clicks on links that would open another site (`target="_blank"`, middle/ctrl-click, and in strict mode same-tab links too), then shows a toast with **Open once** / **Always allow**. |
 | 4 | **Browser backstop** | `background.js` | Watches `webNavigation.onCreatedNavigationTarget` and every top-level request (`webRequest`, read-only). A new tab whose address is a different site from its opener is closed — this catches tricks the page guard can't see, like `window.open('')` followed by `w.location = ad`, or a same-site "bounce" page that redirects to an ad. A page sending **its own tab** to another site is stopped **where it is**: scripted redirects are cancelled inside the page (Navigation API `navigate` event), server redirects and ad-frame `top.location` jumps are stopped by the worker (`window.stop()` in that exact page). You stay on the page and a notice offers **Open once** / **Always allow**. If one slips through, the tab goes back. |
 | 5 | **Cosmetic filter** | `cosmetic.js` + `guard.js` | A style sheet hides known ad containers so you don't see empty boxes. |
-| 6 | **On-screen popup closer** | `overlay.js` | Closes things a page puts over its own content: newsletter and "subscribe" modals, cookie walls, "turn off your ad blocker" boxes, notification prompts, interstitial ads, invisible click-trap layers. See below. |
+| 6 | **On-screen popup closer** | `overlay.js` | Closes things a page puts over its own content: newsletter and "subscribe" modals, cookie walls, "turn off your ad blocker" boxes, notification prompts, interstitial ads, invisible click-trap layers. It also runs inside frames and clears what is laid over a video or embedded player. See below. |
 
 **How it decides "same site":** it compares registered domains (eTLD+1): `mail.google.com` and
 `www.google.com` are one site; `google.com` and `youtube.com` are two; `bbc.co.uk` handles the
@@ -100,6 +100,33 @@ Then it gives scrolling back (undoes `overflow: hidden` / `position: fixed` scro
 appeared after the page loaded) and removes the blur sites put on the content behind. A small notice
 says what was closed, with **Undo** and **Never on this site**.
 
+**Embedded players and frames (video first).** The closer also runs inside every frame of the page,
+and always follows the settings of the site in the address bar. The idea: in an embedded player,
+only the video and its own controls should be left. Whatever lies on top of a video, or on top of
+an embedded player frame, without being part of the player is removed:
+
+| On top of the player | Removed when |
+|---|---|
+| Invisible layer that only catches your click | Over an embedded frame: always. Over a video: only if it looks injected (attached straight to `<body>` inside a player frame, or `z-index` 9999 and up), because players have invisible click layers of their own. |
+| Another frame laid over the video, inside a player frame | Always, except captcha, payment and sign-in frames, and Google's video-ad controls frame (hiding that would hide "Skip ad"). |
+| Link layer to another site stretched over the player | When it covers a good part of the player and leads to neither the frame's own site nor the page's site. |
+
+Layers that hold controls (buttons, sliders, a video) or carry a known player name (`vjs-`, `jw-`,
+`plyr`, `ytp-`, "control", "caption", "poster"…) are never touched. In a wrapper frame, the inner
+player frame counts as the player. A frame with no video yet is treated as the player itself.
+The notice for a frame is shown in the page, and its **Undo** puts everything back in every frame.
+
+**Proven click traps.** If a click on a layer tries to open a popup and Strict Shield blocks it, that
+layer has shown what it is. An empty, invisible layer lying over the page or a player is then
+removed on the spot, so your next click reaches the player. This works on every site where the
+closer isn't off, learned or not. Something you can see is only removed after doing it twice (it
+may be the real play button showing an ad on the first click), and visible links are never removed
+this way.
+
+Loading *only* the video file in a frame isn't possible in general: a player needs its own scripts to
+fetch and play the video. So the frame's code still runs; its popups and redirects are blocked by
+the layers above, and what it lays over the video is removed here.
+
 **Where it runs** (Settings → On-screen popups):
 - **Auto** (default): on sites in your "Auto-close on-screen popups on" list. A site is added by
   itself once it has shown **3** unsolicited popups (counted across visits), which is what "sites that
@@ -108,7 +135,8 @@ says what was closed, with **Undo** and **Never on this site**.
 - **Off**: never by itself.
 
 The toolbar popup has a per-site switch, and a **Close popups on this page now** button that works
-in every mode. Using that button also adds the site to the auto-close list.
+in every mode and reaches every frame of the page. Using that button also adds the site to the
+auto-close list.
 
 ### Memory ("remember what was blocked")
 
@@ -151,13 +179,16 @@ npm test
 ```
 
 The tests start Chromium with the extension, serve fake sites (`site-a.test`, `site-b.test`,
-`doubleclick.net`…) from a local server, and check 40 cases: ad/tracker blocking, cosmetic hiding,
+`doubleclick.net`…) from a local server, and check 48 cases: ad/tracker blocking, cosmetic hiding,
 every popup trick above, server and JS redirects (you stay on the page), undoing a redirect that got
 through, the last-resort blocked page's buttons, balanced mode, pause,
 allow and block lists, that the history is saved, and the on-screen popup closer (learning a
 heavy-popup site, close button vs "Reject all" vs never "Accept", hiding a wall with no close
 button and restoring scroll and blur, leaving a login box you opened alone, click traps, `<dialog>`,
-"never" sites, the manual button, every-site mode). `HEADFUL=1 npm test` to watch.
+"never" sites, the manual button, every-site mode), and embedded players (click traps, ad frames
+and link layers over a video inside a frame; the video, its controls and its own click layer staying;
+a wrapper frame; a layer proven by a blocked popup; a play button that shows one ad first; the notice
+and Undo across frames). `HEADFUL=1 npm test` to watch.
 If the Chrome for Testing download fails, point it at any Chromium build:
 `CHROME_PATH="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" npm test`.
 
@@ -198,8 +229,10 @@ If the Chrome for Testing download fails, point it at any Chromium build:
 - The on-screen popup closer works by looking at the page, not from a list, so it can miss an unusual
   popup or, rarely, close something you wanted. Use **Close popups on this page now** for the first,
   and **Undo** / **Never on this site** for the second.
-- Popups inside iframes (for example inside an embedded video player) are not touched; only the
-  top page is checked.
+- Inside embedded players the closer is careful on purpose. An invisible layer inside the player's
+  own container is only removed after a click on it proved it opens popups (one wasted click), and a
+  fake play button you can see after two. Things the player's own code draws, such as a video ad
+  with its countdown, are left alone.
 - The public-suffix list in `site.js` covers common suffixes, not all ~9,000.
 
 ## License

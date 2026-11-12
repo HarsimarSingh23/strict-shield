@@ -110,6 +110,9 @@ disagree.
 | Cookie bar with "Accept all" / "Reject all" | `overlay.js` | Presses **Reject all**, never Accept |
 | "Turn off your ad blocker" wall with no close button | `overlay.js` | Hidden; scroll lock and blur removed |
 | Invisible full-page link layer (click trap) | `overlay.js` | Hidden |
+| Embedded player frame: invisible layer on `<body>`, ad frame or foreign link layer over the video | `overlay.js` inside that frame | Hidden; video, controls and the player's own click layer stay; notice in the page |
+| Invisible layer over an embedded frame, in the page or in a wrapper frame | `overlay.js` | Hidden |
+| Any empty layer whose own click handler opened a popup that got blocked | `guard-main.js` → `guard.js` → `overlay.js` | Hidden at once if invisible, after the second time if visible |
 | Login box that opens right after you click "Log in" | nobody | Left open (it appeared within 1.5 s of your click) |
 | You type a URL, use a bookmark, Back/Forward, reload | nobody | Always allowed |
 | Domain on your "Always blocked" list | dynamic DNR redirect rule | `blocked.html?kind=blocklist` |
@@ -161,7 +164,8 @@ message, so two writers never overwrite each other.
 | `openOnce` | toast | Open the blocked URL once (new tab or same tab) |
 | `allowSource` | toast | Add this page's site to `allowOutbound`, then open the URL |
 | `overlaySeen` | `overlay.js` (learn mode) | Count unsolicited popups for this site; at 3, add it to `overlaySites` |
-| `overlayClosed` | `overlay.js` | Log one closed on-screen popup for this page, bump the badge |
+| `overlayClosed` | `overlay.js` (any frame) | Log one closed on-screen popup (the frame's address when it was in a frame), bump the badge; for a frame, show the notice in the page |
+| `overlayUndo` | notice's **Undo** | Worker tells every frame of the tab to put back what it closed |
 | `overlayPref` | notice's **Never on this site** | Move this site from `overlaySites` to `overlayNever` |
 | `continue` | `blocked.html` | Open the destination; can also allow the source, trust the destination, or unblock it |
 | `goBack` | `blocked.html` | Return the tab to the page it came from |
@@ -171,8 +175,9 @@ message, so two writers never overwrite each other.
 The last two groups only work from the extension's own pages (`isExtensionPage`). A web page can't
 send them. Content-script messages can only affect the sender's own site.
 
-One message goes the other way: the toolbar popup sends `closeOverlaysNow` to the page's top frame,
-and `overlay.js` answers `{ closed: n }`.
+The toolbar popup sends `closeOverlays` `{ tabId }`. The worker (`closeOverlaysInTab`) then sends
+`closeOverlaysNow` to every frame of that tab, each `overlay.js` answers `{ closed: n }`, and the
+worker returns the total.
 
 ## Dynamic network rules (built by `applyRules()`)
 
@@ -523,7 +528,7 @@ extension pages (`<script>`). It defines a single frozen global, `self.StrictSit
 
 ### 2.3 extension/src/background.js
 
-[Open file](extension/src/background.js) · 659 lines
+[Open file](extension/src/background.js) · 684 lines
 
 
 The only code that can close tabs, redirect them, change network rules and write storage.
@@ -569,7 +574,9 @@ listener never saw, such as pages served by a site's own service worker.
 **On-screen popups**: `countOverlays()` adds to `overlayCounts[site]` through a queue, so counts
 from several tabs don't overwrite each other. At `OVERLAY_LEARN_AT` (3) it adds the site to
 `overlaySites`, unless the site is on `overlayNever`. `overlayClosed` logs a `kind: 'overlay'`
-history entry for the page.
+history entry (with the frame's address when it came from a frame) and, for a frame, shows the
+notice in the page. `closeOverlaysInTab()` sends `closeOverlaysNow` to every frame
+(`webNavigation.getAllFrames`) and adds up the answers.
 
 **History**: `logBlock()` merges repeats (same kind + URL + source site → `count += times`), keeps the
 newest first, trims to `logLimit`, and limits each tab to 40 entries a minute so a spammy page
@@ -837,6 +844,16 @@ function countOverlays(site, n) {
 function toast(tabId, payload) {
   if (tabId < 0) return;
   chrome.tabs.sendMessage(tabId, { type: 'toast', ...payload }, { frameId: 0 }).catch(() => {});
+}
+
+// Toolbar button: close on-screen popups in every frame of a tab, right now.
+async function closeOverlaysInTab(tabId) {
+  const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null) || [];
+  const answers = await Promise.all(frames.map((f) =>
+    chrome.tabs.sendMessage(tabId, { type: 'closeOverlaysNow' }, { frameId: f.frameId })
+      .then((r) => ({ frameId: f.frameId, closed: (r && r.closed) || 0 }), () => null)));
+  const ok = answers.filter(Boolean);
+  return { reached: ok.some((a) => a.frameId === 0), closed: ok.reduce((n, a) => n + a.closed, 0) };
 }
 
 /* ------------------------------------------------------------ the guards */
@@ -1161,8 +1178,20 @@ async function handleMessage(msg, sender) {
     }
     case 'overlayClosed': {
       const times = Math.max(1, Math.min(10, msg.count | 0));
-      if (S.isWeb(pageUrl)) logBlock({ kind: 'overlay', url: pageUrl, fromUrl: pageUrl, tabId, times });
+      // Closed inside an embedded frame: log that frame's address, and show
+      // the notice in the page itself (a frame is too small for one).
+      const inFrame = !!sender.frameId;
+      const where = inFrame && S.isWeb(sender.url) ? sender.url : pageUrl;
+      if (S.isWeb(pageUrl)) logBlock({ kind: 'overlay', url: where, fromUrl: pageUrl, tabId, times });
       bumpBadge(tabId, times);
+      if (inFrame) {
+        toast(tabId, { kind: 'overlay', title: 'Popup closed', text: 'Removed a popup layer from an embedded player on this page.' });
+      }
+      return { ok: true };
+    }
+    case 'overlayUndo': {
+      // Every frame of this tab puts back what it closed.
+      if (tabId >= 0) chrome.tabs.sendMessage(tabId, { type: 'overlayUndo' }).catch(() => {});
       return { ok: true };
     }
     case 'overlayPref': {
@@ -1222,6 +1251,9 @@ async function handleMessage(msg, sender) {
       });
       return { ok: true, lists };
     }
+    case 'closeOverlays': {
+      return { ok: true, ...(await closeOverlaysInTab(msg.tabId)) };
+    }
     case 'clearLog': {
       await chrome.storage.local.set({ log: [], stats: { since: Date.now() } });
       return { ok: true };
@@ -1247,7 +1279,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 ### 2.4 extension/src/content/guard-main.js
 
-[Open file](extension/src/content/guard-main.js) · 155 lines
+[Open file](extension/src/content/guard-main.js) · 186 lines
 
 
 Runs in the page's own JavaScript world, before any of the page's scripts. It holds no settings
@@ -1255,9 +1287,14 @@ and makes no decisions. It intercepts the calls that open popups and asks `guard
 
 - It saves the native functions (`dispatchEvent`, `URL`, property getters) at startup, so the page
   can't fake them later.
-- **`allowed(url)`** dispatches a `__strictshield_q` CustomEvent on `window`. `guard.js` answers
+- **`allowed(url)`** dispatches a `__strictshield_q` CustomEvent. `guard.js` answers
   synchronously with `__strictshield_r` (`'allow'` / `'block'`). If no answer comes back (for example
   after the extension was reloaded), the call is allowed and the worker remains the safety net.
+- **`listenerElement()`**: while a click event is being handled, `window.event.currentTarget` is the
+  element whose own listener is running. The question is dispatched **on that element** (it bubbles
+  to `window`, where `guard.js` listens), so `guard.js` learns which element opened the popup.
+  Listeners on `document` or `window` give no element: any click reaches those, so they prove
+  nothing about the element clicked.
 - It wraps `window.open` with a `Proxy`, so the function still looks native. It also patches the
   `contentWindow` / `contentDocument` getters, so a freshly created iframe's `window.open` is
   wrapped before the page can use it.
@@ -1276,6 +1313,8 @@ and makes no decisions. It intercepts the calls that open popups and asks `guard
  * This file wraps those APIs and asks the isolated content script (guard.js)
  * for a verdict through a synchronous DOM event. It holds no settings itself;
  * the service worker independently closes anything that slips past.
+ * The question is sent from the element whose click listener is opening the
+ * popup, which tells overlay.js which element on the page is a click trap.
  */
 (() => {
   'use strict';
@@ -1304,7 +1343,15 @@ and makes no decisions. It intercepts the calls that open popups and asks `guard
   const formTarget = getDesc(HTMLFormElement.prototype, 'target').get;
   const AnchorEl = HTMLAnchorElement;
   const FormEl = HTMLFormElement;
+  const ElementCtor = Element;
+  const doc = document;
   const toLower = String.prototype.toLowerCase;
+  const ownerDoc = getDesc(Node.prototype, 'ownerDocument').get;
+  const evType = getDesc(Event.prototype, 'type').get;
+  const evCurrentTarget = getDesc(Event.prototype, 'currentTarget').get;
+  const currentEvent = (getDesc(win, 'event') || getDesc(Window.prototype, 'event') || {}).get;
+  const CLICKS = { __proto__: null, click: 1, auxclick: 1, dblclick: 1, mousedown: 1, mouseup: 1,
+    pointerdown: 1, pointerup: 1, touchstart: 1, touchend: 1 };
 
   let answer = null;
   apply(listen, win, [ANSWER, (e) => { answer = e.detail; }, true]);
@@ -1318,15 +1365,36 @@ and makes no decisions. It intercepts the calls that open popups and asks `guard
     }
   }
 
+  // The element whose own click listener is running right now, if there is
+  // one. (Listeners on document or window give null: any click reaches those.)
+  function listenerElement() {
+    try {
+      const ev = currentEvent ? apply(currentEvent, win, []) : null;
+      if (!ev || !CLICKS[apply(evType, ev, [])]) return null;
+      const el = apply(evCurrentTarget, ev, []);
+      if (!(el instanceof ElementCtor) || !apply(isConnected, el, []) || apply(ownerDoc, el, []) !== doc) return null;
+      return el;
+    } catch {
+      return null;
+    }
+  }
+
+  function ask(target, detail) {
+    try {
+      apply(dispatch, target, [new CustomEvt(ASK, { detail, bubbles: true, composed: true })]);
+    } catch { /* no answer */ }
+  }
+
   // Synchronous round trip to guard.js. No answer (extension reloaded,
   // paused, ...) means allow: the service worker is still the backstop.
+  // The question is sent from the element whose click listener is opening
+  // the popup, so guard.js can tell which element is a click trap.
   function allowed(url, via) {
     answer = null;
-    try {
-      apply(dispatch, win, [new CustomEvt(ASK, { detail: stringify({ url, via }) })]);
-    } catch {
-      return true;
-    }
+    const detail = stringify({ url, via });
+    const el = listenerElement();
+    if (el) ask(el, detail);
+    if (answer === null) ask(win, detail);
     return answer !== 'block';
   }
 
@@ -1428,7 +1496,7 @@ and makes no decisions. It intercepts the calls that open popups and asks `guard
 
 ### 2.5 extension/src/content/guard.js
 
-[Open file](extension/src/content/guard.js) · 353 lines
+[Open file](extension/src/content/guard.js) · 376 lines
 
 
 Runs in the extension's isolated world in every frame.
@@ -1458,10 +1526,14 @@ Runs in the extension's isolated world in every frame.
   back if a page removes it.
 - **Toast** (top frame only): a closed shadow root, so page CSS and scripts can't reach it. Repeats
   of the same site are grouped with a `×N` badge, at most 3 toasts show, and they auto-hide after
-  10 s. The buttons check `isTrusted`, so a page can't click them itself. `overlay.js` can pass its
-  own title, text and buttons (`actions`).
-- **`self.StrictShieldContent`**: what `overlay.js` uses: `config()`, `onConfig()`, `toast()`,
-  `send()`, `topSite`, and `isOwn()` (so the toast is never treated as a popup).
+  10 s. The buttons check `isTrusted`, so a page can't click them itself. For `kind: 'overlay'`
+  (from `overlay.js`, or relayed by the worker for a frame) the buttons are **Undo** and **Never on
+  this site**; both go through the worker so every frame is reached.
+- **Blocked-click evidence**: when a popup is blocked, the element the question came from (or the
+  link that was clicked) is passed to `onBlockedClick` listeners.
+- **`self.StrictShieldContent`**, in every frame: what `overlay.js` uses: `isTop`, `config()`,
+  `onConfig()`, `onBlockedClick()`, `send()`, `topSite`, and in the top frame `toast()` and `isOwn()`
+  (so the toast is never treated as a popup).
 
 
 ```javascript
@@ -1471,7 +1543,8 @@ Runs in the extension's isolated world in every frame.
  *   - cancels clicks on links that would open another site
  *   - hides ad containers (cosmetic filtering)
  *   - shows the "blocked" toast in the top frame
- *   - exposes self.StrictShieldContent (config + toast) to overlay.js
+ *   - exposes self.StrictShieldContent (config, toast, blocked-click evidence)
+ *     to overlay.js, in every frame
  */
 (() => {
   'use strict';
@@ -1512,12 +1585,22 @@ Runs in the extension's isolated world in every frame.
     return S.decide({ fromUrl: topUrl, toUrl: target, kind: 'popup', settings, lists }).allow;
   }
 
+  // overlay.js listens here: (element, isLink) for every click whose popup was blocked.
+  const blockedClickListeners = [];
+  function notifyBlockedClick(el, isLink) {
+    for (const cb of blockedClickListeners) { try { cb(el, isLink); } catch { /* listener bug */ } }
+  }
+
   window.addEventListener(ASK, (e) => {
     let req;
     try { req = JSON.parse(e.detail); } catch { return; }
     const allow = popupAllowed(req.url);
     if (!allow) report('popup', req.url, true);
     window.dispatchEvent(new CustomEvent(ANSWER, { detail: allow ? 'allow' : 'block' }));
+    // guard-main.js sends the question from the element whose own click
+    // listener tried to open the popup: evidence that it is a click trap.
+    const el = e.composedPath ? e.composedPath()[0] : e.target;
+    if (!allow && el && el.nodeType === 1) notifyBlockedClick(el, false);
   }, true);
 
   /* ---------------------------------------------------------- link clicks */
@@ -1584,6 +1667,7 @@ Runs in the extension's isolated world in every frame.
     }
     e.preventDefault();
     report(newTab ? 'popup' : 'link', href, newTab);
+    notifyBlockedClick(a, true);
   }
   window.addEventListener('click', onClick, true);
   window.addEventListener('auxclick', onClick, true);
@@ -1671,6 +1755,20 @@ Runs in the extension's isolated world in every frame.
     });
   } catch { /* extension reloaded */ }
 
+  // For overlay.js, which runs next in this same isolated world.
+  const api = {
+    isTop,
+    topUrl,
+    topSite,
+    send,
+    config: () => ({ settings, lists, loaded: configLoaded }),
+    onConfig: (cb) => { configListeners.push(cb); },
+    onBlockedClick: (cb) => { blockedClickListeners.push(cb); },
+    toast: () => {},      // only the top frame shows notices
+    isOwn: () => false
+  };
+  self.StrictShieldContent = api;
+
   /* ---------------------------------------------------------------- toast */
 
   if (!isTop) return;
@@ -1719,13 +1817,14 @@ Runs in the extension's isolated world in every frame.
     return n;
   }
 
-  // msg: { kind, url } from the worker, or { kind, title, text, actions: [{ label, run }] }
-  // from overlay.js (same world, so actions can be functions).
+  // msg: { kind, url } for something blocked, or { kind: 'overlay', title, text }
+  // for on-screen popups closed here or (relayed by the worker) in a frame.
   function showToast(msg) {
     ensureHost();
     const url = String(msg.url || '');
     const web = S.isWeb(url);
-    const site = msg.actions ? topSite : (web ? S.hostOf(url) : url.split(':')[0] + ':');
+    const overlay = msg.kind === 'overlay';
+    const site = overlay ? topSite : (web ? S.hostOf(url) : url.split(':')[0] + ':');
     const key = `${msg.kind}|${site}`;
     const existing = rows.get(key);
     if (existing) {
@@ -1756,7 +1855,11 @@ Runs in the extension's isolated world in every frame.
       line.append(document.createTextNode(web ? 'This page tried to open ' : 'This page tried to open a '));
       line.append(el('b', '', site));
     }
-    const actions = msg.actions || (web ? [
+    const actions = overlay ? [
+      // The worker tells every frame of this tab to put back what it closed.
+      { label: 'Undo', run: () => send({ type: 'overlayUndo' }) },
+      { label: `Never on ${topSite}`, run: () => { send({ type: 'overlayUndo' }); send({ type: 'overlayPref', pref: 'never' }); } }
+    ] : (web ? [
       { label: 'Open once', run: () => send({ type: 'openOnce', url, newTab: msg.kind === 'popup' }) },
       { label: `Always allow ${topSite}`, run: () => send({ type: 'allowSource', url, newTab: msg.kind === 'popup' }) }
     ] : []);
@@ -1807,27 +1910,21 @@ Runs in the extension's isolated world in every frame.
     });
   } catch { /* extension reloaded */ }
 
-  // For overlay.js, which runs next in this same isolated world (top frame only).
-  self.StrictShieldContent = Object.freeze({
-    topUrl,
-    topSite,
-    send,
-    config: () => ({ settings, lists, loaded: configLoaded }),
-    onConfig: (cb) => { configListeners.push(cb); },
-    toast: (msg) => whenBody(() => showToast(msg)),
-    isOwn: (node) => !!host && node === host
-  });
+  api.toast = (msg) => whenBody(() => showToast(msg));
+  api.isOwn = (node) => !!host && node === host;
 })();
 ```
 
 
 ### 2.6 extension/src/content/overlay.js
 
-[Open file](extension/src/content/overlay.js) · 432 lines
+[Open file](extension/src/content/overlay.js) · 653 lines
 
 
-The on-screen popup closer. It runs in the top frame only, after `guard.js`, and uses
-`self.StrictShieldContent` for settings and the notice.
+The on-screen popup closer. It runs in every frame, after `guard.js`, and uses
+`self.StrictShieldContent` for settings, the notice and blocked-click evidence. Page-level popups
+(modals, backdrops, banners) are only looked for in the top frame; layers over players in every
+frame. Captcha, payment and sign-in frames, and frames under 200×120 px, are skipped.
 
 - **`mode()`**: `'close'` on sites in `overlaySites` (or every site in `everywhere` mode), `'learn'`
   elsewhere in `auto` mode, `'off'` for paused or `overlayNever` sites, or when the setting is off.
@@ -1853,27 +1950,53 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
 - **`scan()`**: up to 4 rounds, because closing a modal often reveals its backdrop or a cookie bar.
   In learn mode it only reports new popups (`overlaySeen`). Each closed popup is logged
   immediately (`overlayClosed`), then one notice is shown with **Undo** and **Never on this site**.
-- **When it scans**: in close mode, a `MutationObserver` (at most every 600 ms); in every mode,
-  timed checks from 0.8 s to 60 s after load, on scroll, and when the mouse leaves the page (exit
-  intent). It also answers `closeOverlaysNow` from the toolbar popup, which skips the "opened by
-  you" check.
+- **`players()`**: visible `<video>` and `<iframe>` elements of at least 200×120 px. In the top
+  frame, the 6 largest. In a frame, only its main content (a video filling 30% or more of the frame,
+  else such a nested frame, else the frame's own viewport).
+- **`findCovers()`**: for each player, `elementsFromPoint` at 5 points inside it. Everything painted
+  above the player there is traced up to its layer (`layerOf`: the highest ancestor that doesn't
+  also hold the player) and judged by `classifyCover()`:
+  `adframe` (another frame over a video inside a player frame, unless captcha/payment/sign-in or
+  the IMA ad-controls frame), `adlink` (a link layer to a site that is neither the frame's nor the
+  page's, covering enough of the player), `trap` (bare and invisible, covering 70% or more: over an
+  embedded frame always, over a video only with `z-index` ≥ 9999 or attached to `<body>` in a
+  frame). Layers with controls, media or a player-like class/id (`PLAYER_NAME`) return `null`.
+- **`onBlockedClick`**: proof from a blocked popup. From the element that opened it, climb while
+  the ancestors are bare; the outermost one that is positioned and lies over half the frame or 60%
+  of a player is the trap. Invisible: hidden at once. Visible: after the second time. Visible
+  links: never.
+- **Frames and the notice**: a frame can't show a notice, so the worker shows it in the page when
+  it receives `overlayClosed` from a frame. **Undo** is broadcast to every frame (`overlayUndo`).
+- **When it scans**: in close mode, a `MutationObserver` (at most every 600 ms, 1 s in frames); in
+  every mode, timed checks from 0.8 s to 60 s after load, on scroll, and when the mouse leaves the
+  page (exit intent). Not while a mouse button is held, so drag shields aren't judged. It also
+  answers `closeOverlaysNow`, which skips the "opened by you" check.
 
 
 ```javascript
 /*
- * On-screen popup closer (top frame only, isolated world, after guard.js).
+ * On-screen popup closer (every frame, isolated world, after guard.js).
  *
- * Finds things a page puts over its own content without being asked:
- * newsletter / "subscribe" modals, cookie walls, "turn off your ad blocker"
- * boxes, notification prompts, interstitial ads and invisible click-trap
- * layers. For each one it tries, in order:
+ * In the page itself it finds things put over the content without being
+ * asked: newsletter / "subscribe" modals, cookie walls, "turn off your ad
+ * blocker" boxes, notification prompts, interstitial ads and invisible
+ * click-trap layers. For each one it tries, in order:
  *   1. the popup's own close / "No thanks" / "Reject all" button
  *   2. the Escape key
  *   3. hiding it
  * and then gives scrolling back and removes the blur the page put behind it.
  * It never presses Accept, Subscribe, Allow or Sign up.
  *
- * Where it acts (settings.overlayMode):
+ * Embedded players (video first): in the page and inside every frame, what
+ * sits on top of a video or an embedded player frame without being part of
+ * it is removed, so only the video and its own controls are left:
+ *   - invisible layers that only exist to catch your click
+ *   - ad frames laid over a video
+ *   - link layers to another site stretched over the player
+ * A layer whose own click handler tried to open a popup that was blocked is
+ * removed too, in every mode but "off": that is proof it was a click trap.
+ *
+ * Where it acts (settings.overlayMode), always by the site of the top page:
  *   'auto'       sites in lists.overlaySites: ones you added, plus sites it
  *                learned because they showed 3 popups; elsewhere it only counts
  *   'everywhere' every site
@@ -1883,10 +2006,15 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
  */
 (() => {
   'use strict';
-  if (window.top !== window) return;
   const S = self.StrictSite;
   const C = self.StrictShieldContent;
   if (!S || !C) return;
+
+  // Never touch captcha, payment or sign-in frames.
+  const SAFE_FRAME = /recaptcha|hcaptcha|challenges\.cloudflare|turnstile|stripe|razorpay|paypal|checkout|payments?\b|accounts\.google|appleid|login\.(microsoft|live)/i;
+  const isFrame = !C.isTop;
+  if (isFrame && SAFE_FRAME.test(location.href)) return;
+  const frameSite = S.siteOf(location.href) || C.topSite;
 
   // Where to look: the middle of the screen for modals, the edges for banners.
   const CENTER_PROBES = [[0.5, 0.5], [0.3, 0.35], [0.7, 0.35], [0.3, 0.65], [0.7, 0.65]];
@@ -1897,12 +2025,21 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
   const CLOSE_TEXT = /^(×|✕|✖|✗|╳|x|close|close this|close ad|dismiss|no,? thanks?\b.*|no thank you.*|not now|maybe later|later|skip|skip ad|cancel|continue (reading|to (the )?site|without .*)|i'?ll pass|not interested|reject|reject all|decline( all)?|deny|necessary (cookies )?only|only necessary.*)$/i;
   const CLOSE_HINT = /close|dismiss|no.?thanks|not.?now|maybe.?later|skip|cancel|reject|decline/i;
   const NOT_CLOSE = /accept|agree|allow|subscribe|sign.?up|log.?in|sign.?in|register|continue with|yes|^ok$|got it|enable|install|download|buy|shop|claim|get |join/i;
-  // Never touch captcha, payment or sign-in frames.
-  const SAFE_FRAME = /recaptcha|hcaptcha|challenges\.cloudflare|turnstile|stripe|razorpay|paypal|checkout|payments?\b|accounts\.google|appleid|login\.(microsoft|live)/i;
   const INTERACTIVE = 'a,button,input,select,textarea,label,summary,[role=button],[role=link],[role=menuitem],[role=tab],[onclick],[contenteditable]';
   const RESCAN_AFTER_MS = [800, 2000, 4000, 8000, 15000, 30000, 60000];
+  const MIN_GAP_MS = isFrame ? 1000 : 600; // between two scans
+
+  // Embedded players.
+  const MIN_PLAYER = { width: 200, height: 120 };
+  // What a player's own layers hold ...
+  const PLAYER_PARTS = 'video,audio,canvas,iframe,embed,object,input,select,textarea,button,[role=button],[role=slider],[role=menu]';
+  // ... and what they are usually called.
+  const PLAYER_NAME = /(^|\s)(vjs-|jw-|ytp-|fp-|art-|mejs)|video-js|jwplayer|plyr|html5-video|flowplayer|dplayer|shaka|clappr|bmpui|theoplayer|control|caption|subtitle|poster|spinner|loading|progress|seek|volume/i;
+  // The controls of a playing video ad live in this frame; hiding it would hide "Skip ad".
+  const AD_UI_FRAME = /imasdk\.googleapis\.com/i;
 
   let lastGesture = { t: -Infinity, interactive: false };
+  let pressedAt = 0;          // a mouse button is down: you may be dragging something
   let prevScan = performance.now();
   let lastScanEnd = 0;
   let busy = false;
@@ -1916,6 +2053,7 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
   const firstSeen = new WeakMap(); // element -> { user }
   const changedAt = new WeakMap(); // element -> when it was added or restyled (from the observer)
   const attempts = new WeakMap();  // element -> times we closed it (pages that re-open)
+  const strikes = new WeakMap();   // visible layer -> blocked popups its clicks caused
   const counted = new WeakSet();   // elements already reported for learning
   const hidden = [];               // { el, value, priority } for Undo
   const restyled = [];             // { el, prop, value, priority } for Undo
@@ -1937,10 +2075,14 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
   addEventListener('keydown', onGesture, true);
   function onGesture(e) {
     if (!e.isTrusted) return;
+    if (e.type === 'pointerdown') pressedAt = performance.now();
     const t = e.composedPath ? e.composedPath()[0] : e.target;
     const interactive = e.type === 'keydown' || !!(t && t.closest && t.closest(INTERACTIVE));
     lastGesture = { t: performance.now(), interactive };
   }
+  for (const type of ['pointerup', 'pointercancel']) addEventListener(type, () => { pressedAt = 0; }, true);
+  // While you drag (a slider, a splitter), pages put up short-lived shields. Don't judge those.
+  const pressing = () => pressedAt > 0 && performance.now() - pressedAt < 5000;
 
   // When did this popup (or the wrapper it was added in) appear?
   function appearedAt(el) {
@@ -1967,9 +2109,32 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
     return info.user;
   }
 
-  /* ------------------------------------------------------------ detection */
+  /* ------------------------------------------------------------ geometry */
 
   const parentOf = (n) => n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
+  const area = (r) => Math.max(0, r.width) * Math.max(0, r.height);
+  const viewport = () => ({ left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight });
+
+  function intersect(a, b) {
+    const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    return w > 0 && h > 0 ? w * h : 0;
+  }
+
+  function coverage(el) {
+    const rect = el.getBoundingClientRect();
+    return { rect, cover: intersect(rect, viewport()) / (innerWidth * innerHeight) };
+  }
+
+  function shown(el) {
+    if (!el.isConnected) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 1 && r.height > 1;
+  }
+
+  /* -------------------------------------------------- page-level popups */
 
   // Outermost position:fixed ancestor (or a modal <dialog>) of a hit element.
   function fixedRoot(el) {
@@ -1980,21 +2145,6 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
       if (getComputedStyle(n).position === 'fixed') root = n;
     }
     return root;
-  }
-
-  function coverage(el) {
-    const r = el.getBoundingClientRect();
-    const w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0));
-    const h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
-    return { rect: r, cover: (w * h) / (innerWidth * innerHeight) };
-  }
-
-  function shown(el) {
-    if (!el.isConnected) return false;
-    const cs = getComputedStyle(el);
-    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 1 && r.height > 1;
   }
 
   // 'modal' | 'backdrop' | 'banner' | null
@@ -2023,8 +2173,7 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
     return 'banner';
   }
 
-  function findPopups() {
-    const found = new Map();
+  function findPagePopups(found) {
     const probe = (points, where) => {
       for (const [px, py] of points) {
         const stack = document.elementsFromPoint(innerWidth * px, innerHeight * py);
@@ -2044,6 +2193,147 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
     for (const d of document.querySelectorAll('dialog[open]')) {
       if (!found.has(d) && d.matches(':modal') && classify(d, 'center')) found.set(d, 'modal');
     }
+  }
+
+  /* ---------------------------------------------- embedded players */
+
+  // Videos and embedded frames big enough to be a player, most important first.
+  // Inside a frame only its main content counts; with none, the frame itself.
+  function players() {
+    const view = viewport();
+    const out = [];
+    for (const el of document.querySelectorAll('video,iframe')) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < MIN_PLAYER.width || rect.height < MIN_PLAYER.height) continue;
+      const visible = intersect(rect, view);
+      if (visible < area(rect) * 0.3 || (isFrame && visible < area(view) * 0.3)) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) < 0.1) continue;
+      if (el.localName === 'iframe' && SAFE_FRAME.test(el.src || '')) continue;
+      out.push({ el, rect, video: el.localName === 'video', size: area(rect) });
+    }
+    out.sort((a, b) => b.size - a.size);
+    if (!isFrame) return out.slice(0, 6);
+    const videos = out.filter((p) => p.video);
+    const main = (videos.length ? videos : out).slice(0, 2);
+    return main.length ? main : [{ el: null, rect: view, video: false, size: area(view) }];
+  }
+
+  // The whole layer a hit element belongs to: its highest ancestor that does
+  // not also hold the player. z is the highest z-index on the way up.
+  function layerOf(hit, playerEl) {
+    let root = hit;
+    let z = parseInt(getComputedStyle(hit).zIndex, 10) || 0;
+    for (let p = parentOf(root); p && p !== document.body && p !== document.documentElement; p = parentOf(p)) {
+      if (playerEl && p.contains(playerEl)) break;
+      root = p;
+      z = Math.max(z, parseInt(getComputedStyle(p).zIndex, 10) || 0);
+    }
+    return { root, z };
+  }
+
+  function alphaOf(color) {
+    if (color === 'transparent') return 0;
+    const m = /^rgba?\((.+)\)$/.exec(color);
+    if (!m) return 1;
+    const parts = m[1].split(/[\s,/]+/).filter(Boolean);
+    return parts.length >= 4 ? parseFloat(parts[3]) : 1;
+  }
+
+  const painted = (cs) => cs.backgroundImage !== 'none' || alphaOf(cs.backgroundColor) > 0.1;
+
+  // Nothing to see: fully transparent, no picture, no text.
+  function invisible(el) {
+    const cs = getComputedStyle(el);
+    if (Number(cs.opacity) < 0.1) return true;
+    if (painted(cs) || el.querySelector('img,svg,picture')) return false;
+    if ((el.innerText || '').trim()) return false;
+    const inner = el.getElementsByTagName('*');
+    if (inner.length > 5) return false;
+    for (const child of inner) if (painted(getComputedStyle(child))) return false;
+    return true;
+  }
+
+  // Holds nothing a player or a real dialog would: no media, controls or text.
+  function bare(el) {
+    if (el.matches(PLAYER_PARTS) || el.querySelector(PLAYER_PARTS)) return false;
+    return (el.innerText || '').replace(/\s+/g, ' ').trim().length <= 40;
+  }
+
+  const named = (el) => PLAYER_NAME.test(`${el.getAttribute('class') || ''} ${el.id || ''}`);
+
+  // A link that leaves both this frame's site and the page's site.
+  function foreignLink(a) {
+    const href = typeof a.href === 'string' ? a.href : '';
+    const site = S.isWeb(href) ? S.siteOf(href) : '';
+    return !!site && site !== frameSite && site !== C.topSite;
+  }
+
+  // What is this thing sitting on top of a video or embedded player?
+  // 'adframe' | 'adlink' | 'trap', or null: part of the player, or unknown. Leave it.
+  function classifyCover(root, z, player) {
+    if (root === document.body || root === document.documentElement || C.isOwn(root)) return null;
+    const fs = document.fullscreenElement;
+    if (fs && (root === fs || root.contains(fs))) return null;
+    const cs = getComputedStyle(root);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.pointerEvents === 'none') return null;
+    const over = intersect(root.getBoundingClientRect(), player.rect) / player.size; // share of the player it covers
+    if (over < 0.05) return null;
+
+    // Another frame laid over the video inside a player frame: an ad.
+    const frames = root.localName === 'iframe' ? [root] : [...root.querySelectorAll('iframe')];
+    if (frames.length) {
+      if (!isFrame || !player.video || named(root) || root.querySelector('video,audio')) return null;
+      if (frames.some((f) => SAFE_FRAME.test(f.src || '') || AD_UI_FRAME.test(f.src || ''))) return null;
+      return 'adframe';
+    }
+    if (named(root) || !bare(root)) return null;
+
+    // A link to another site stretched over the player. (Not judged for a
+    // video in the page itself: cards there often link out on purpose.)
+    const a = root.matches('a[href]') ? root : root.querySelector('a[href]');
+    if (a && foreignLink(a) && (isFrame || !player.video)) {
+      const need = !player.el ? 0.7 : (player.video ? 0.3 : 0.5);
+      if (over >= need && area(a.getBoundingClientRect()) >= area(root.getBoundingClientRect()) * 0.5) return 'adlink';
+    }
+
+    // An invisible layer that only exists to catch your click.
+    if (over >= (player.el ? 0.7 : 0.85) && invisible(root)) {
+      // Nothing invisible belongs over an embedded frame. Over a video it could
+      // be the player's own click layer, so there it also has to look injected.
+      if (player.el && !player.video) return 'trap';
+      const onBody = root.parentElement === document.body || root.parentElement === document.documentElement;
+      if (z >= 9999 || (isFrame && onBody)) return 'trap';
+    }
+    return null;
+  }
+
+  function findCovers(found) {
+    for (const player of players()) {
+      const r = player.rect;
+      for (const [px, py] of CENTER_PROBES) {
+        const x = r.left + r.width * px;
+        const y = r.top + r.height * py;
+        if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+        const stack = document.elementsFromPoint(x, y);
+        // Everything painted above the player at this point (or, in a frame
+        // without a player yet, just the topmost thing).
+        const above = player.el ? stack.slice(0, Math.max(0, stack.indexOf(player.el))) : stack.slice(0, 1);
+        for (const hit of above) {
+          if (player.el && hit.contains(player.el)) continue;
+          const { root, z } = layerOf(hit, player.el);
+          if (found.has(root)) continue;
+          const type = classifyCover(root, z, player);
+          if (type) found.set(root, type);
+        }
+      }
+    }
+  }
+
+  function findPopups() {
+    const found = new Map();
+    if (!isFrame) findPagePopups(found);
+    findCovers(found);
     return [...found].map(([el, type]) => ({ el, type }));
   }
 
@@ -2112,7 +2402,8 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
     el.style.setProperty('display', 'none', 'important');
   }
 
-  // Returns true if the popup is gone afterwards.
+  // Returns true if the popup is gone afterwards. Modals and banners get
+  // their own close button pressed first; everything else is simply hidden.
   async function close({ el, type }) {
     if (!el.isConnected) return false;
     const n = (attempts.get(el) || 0) + 1;
@@ -2173,27 +2464,69 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
     for (const r of restyled.splice(0).reverse()) r.el.style.setProperty(r.prop, r.value, r.priority);
   }
 
-  function report(n) {
+  // The notice. For a frame, the worker shows it in the page when it gets
+  // 'overlayClosed' from here. Its Undo reaches every frame through the worker.
+  function notify(n) {
+    if (isFrame) return;
     C.toast({
       kind: 'overlay',
       title: 'Popup closed',
       text: learnedNow
         ? `Strict Shield now closes popups on ${C.topSite} automatically.`
-        : `Closed ${n === 1 ? 'a popup' : `${n} popups`} covering this page.`,
-      actions: [
-        { label: 'Undo', run: undo },
-        { label: `Never on ${C.topSite}`, run: () => { undo(); C.send({ type: 'overlayPref', pref: 'never' }); } }
-      ]
+        : `Closed ${n === 1 ? 'a popup' : `${n} popups`} covering this page.`
     });
     learnedNow = false;
   }
+
+  /* ------------------------------------------------- proven click traps */
+
+  // Out of the normal flow and lying over most of this frame, or of a player.
+  function liesOverPlayer(el) {
+    const position = getComputedStyle(el).position;
+    if (position !== 'absolute' && position !== 'fixed') return false;
+    const rect = el.getBoundingClientRect();
+    if (intersect(rect, viewport()) >= innerWidth * innerHeight * 0.5) return true;
+    return players().some((p) => p.el && intersect(rect, p.rect) >= p.size * 0.6);
+  }
+
+  // guard.js calls this when a click tried to open a popup that was blocked:
+  // `el` is the element whose own click handler did it, or the link clicked.
+  // If that is an empty layer lying over the page or a player, it is a trap.
+  C.onBlockedClick((el, isLink) => {
+    if (stopped || !document.body || mode() === 'off') return;
+    let layer = null;
+    for (let n = el; n && n.nodeType === 1 && n !== document.body && n !== document.documentElement; n = parentOf(n)) {
+      if (!bare(n)) break;
+      if (liesOverPlayer(n)) layer = n;
+    }
+    if (!layer || C.isOwn(layer)) return;
+    // Something you can see may be the real play button showing an ad on the
+    // first click, so it gets a second chance. A visible link is never hidden
+    // here: you may want it (the notice offers "Open once").
+    if (!invisible(layer)) {
+      if (isLink) return;
+      const n = (strikes.get(layer) || 0) + 1;
+      strikes.set(layer, n);
+      if (n < 2) return;
+    }
+    hide(layer);
+    C.send({ type: 'overlayClosed', count: 1 });
+    if (mode() === 'learn' && !counted.has(layer)) C.send({ type: 'overlaySeen', count: 1 });
+    counted.add(layer);
+    notify(1);
+  });
 
   /* -------------------------------------------------------------- scanning */
 
   async function scan(force = false) {
     if (busy || !document.body || (stopped && !force)) return 0;
+    if (isFrame && (innerWidth < MIN_PLAYER.width || innerHeight < MIN_PLAYER.height)) return 0; // too small to hold a player
     const m = force ? 'close' : mode();
     if (m === 'off') return 0;
+    if (pressing() && !force) {
+      schedule(500);
+      return 0;
+    }
     busy = true;
     let closed = 0;
     try {
@@ -2216,9 +2549,9 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
         closed += progress;
         if (!progress) break;
       }
-      if (closed) {
+      if (closed && !isFrame) {
         restorePage();
-        report(closed);
+        notify(closed);
       }
     } finally {
       busy = false;
@@ -2229,7 +2562,7 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
 
   function schedule(delay) {
     if (timer) return;
-    const wait = Math.max(delay, 600 - (performance.now() - lastScanEnd));
+    const wait = Math.max(delay, MIN_GAP_MS - (performance.now() - lastScanEnd));
     timer = setTimeout(() => { timer = 0; scan(); }, wait);
   }
 
@@ -2277,11 +2610,13 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
     const t = performance.now();
     if (t - lastScrollCheck > 1000) { lastScrollCheck = t; schedule(300); }
   }, { passive: true, capture: true });
-  document.documentElement.addEventListener('mouseleave', () => schedule(300));
+  if (document.documentElement) document.documentElement.addEventListener('mouseleave', () => schedule(300));
 
-  // Toolbar popup: "Close popups on this page now".
+  // From the worker: the toolbar's "Close popups on this page now" (sent to
+  // every frame), and the notice's Undo.
   try {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg && msg.type === 'overlayUndo') undo();
       if (!msg || msg.type !== 'closeOverlaysNow') return;
       (async () => {
         for (let i = 0; busy && i < 40; i++) await sleep(50);
@@ -3260,7 +3595,7 @@ The toolbar popup: the current site, two counters, four controls (protection, le
 
 ### 2.16 extension/pages/popup.js
 
-[Open file](extension/pages/popup.js) · 119 lines
+[Open file](extension/pages/popup.js) · 120 lines
 
 
 - Reads the active tab. On browser pages (`chrome://…`) it shows the "doesn't run here" card.
@@ -3269,8 +3604,8 @@ The toolbar popup: the current site, two counters, four controls (protection, le
   effect on the next page load.
 - **Auto-close on-screen popups**: on adds the site to `overlaySites` and removes it from
   `overlayNever`; off does the opposite, so learning won't turn it back on.
-- **Close popups on this page now** sends `closeOverlaysNow` to the page. If anything was closed
-  and the mode is `auto`, the site is added to `overlaySites`.
+- **Close popups on this page now** sends `closeOverlays` to the worker, which asks every frame of
+  the tab. If anything was closed and the mode is `auto`, the site is added to `overlaySites`.
 - It re-renders on every `storage.onChanged`, so it stays live while open.
 
 
@@ -3369,8 +3704,9 @@ The toolbar popup: the current site, two counters, four controls (protection, le
   $('zap').onclick = async () => {
     $('zap').disabled = true;
     $('zapResult').textContent = 'Looking…';
-    const r = await chrome.tabs.sendMessage(tab.id, { type: 'closeOverlaysNow' }, { frameId: 0 }).catch(() => null);
-    if (!r) {
+    // The worker asks the page and every frame inside it (embedded players).
+    const r = await send({ type: 'closeOverlays', tabId: tab.id }).catch(() => null);
+    if (!r || !r.reached) {
       $('zapResult').textContent = 'Reload the page first, then try again.';
     } else if (!r.closed) {
       $('zapResult').textContent = 'Nothing covering this page.';
@@ -3589,7 +3925,7 @@ Settings, with four tabs selected by URL hash (`#protection`, `#lists`, `#histor
           <li><b>Cosmetic filtering.</b>
             A style sheet hides common ad containers so you don't see empty boxes.</li>
           <li><b>On-screen popups.</b>
-            Every few seconds, and whenever the page changes, it checks what sits on top of the middle and edges of the screen. A fixed layer covering the page, a dimmed backdrop, a cookie or newsletter bar, or an invisible click trap counts as a popup, unless it appeared right after you clicked something. It presses the popup's own close / "No thanks" / "Reject all" button, then Escape, then hides it, and gives scrolling back. A site that shows 3 such popups is remembered and handled automatically from then on.</li>
+            Every few seconds, and whenever the page changes, it checks what sits on top of the middle and edges of the screen. A fixed layer covering the page, a dimmed backdrop, a cookie or newsletter bar, or an invisible click trap counts as a popup, unless it appeared right after you clicked something. It presses the popup's own close / "No thanks" / "Reject all" button, then Escape, then hides it, and gives scrolling back. A site that shows 3 such popups is remembered and handled automatically from then on. The same check runs inside embedded frames: on top of a video or an embedded player, invisible click layers, ad frames and link layers to other sites are removed, and the video and its controls are left. A layer whose click tried to open a popup that was blocked is removed right away, on any site.</li>
           <li><b>Memory.</b>
             Every blocked popup, redirect and link is saved in the extension's local storage with how many times it happened. Your allow and block lists are saved there too.</li>
         </ol>
@@ -4029,7 +4365,7 @@ print("icons written to", OUT)
 
 ### 2.24 tools/build-notes.py
 
-[Open file](tools/build-notes.py) · 504 lines
+[Open file](tools/build-notes.py) · 541 lines
 
 
 This file's generator. It reads every source file and writes `NOTES_WITH_CODE.md`.
@@ -4127,6 +4463,9 @@ disagree.
 | Cookie bar with "Accept all" / "Reject all" | `overlay.js` | Presses **Reject all**, never Accept |
 | "Turn off your ad blocker" wall with no close button | `overlay.js` | Hidden; scroll lock and blur removed |
 | Invisible full-page link layer (click trap) | `overlay.js` | Hidden |
+| Embedded player frame: invisible layer on `<body>`, ad frame or foreign link layer over the video | `overlay.js` inside that frame | Hidden; video, controls and the player's own click layer stay; notice in the page |
+| Invisible layer over an embedded frame, in the page or in a wrapper frame | `overlay.js` | Hidden |
+| Any empty layer whose own click handler opened a popup that got blocked | `guard-main.js` → `guard.js` → `overlay.js` | Hidden at once if invisible, after the second time if visible |
 | Login box that opens right after you click "Log in" | nobody | Left open (it appeared within 1.5 s of your click) |
 | You type a URL, use a bookmark, Back/Forward, reload | nobody | Always allowed |
 | Domain on your "Always blocked" list | dynamic DNR redirect rule | `blocked.html?kind=blocklist` |
@@ -4178,7 +4517,8 @@ message, so two writers never overwrite each other.
 | `openOnce` | toast | Open the blocked URL once (new tab or same tab) |
 | `allowSource` | toast | Add this page's site to `allowOutbound`, then open the URL |
 | `overlaySeen` | `overlay.js` (learn mode) | Count unsolicited popups for this site; at 3, add it to `overlaySites` |
-| `overlayClosed` | `overlay.js` | Log one closed on-screen popup for this page, bump the badge |
+| `overlayClosed` | `overlay.js` (any frame) | Log one closed on-screen popup (the frame's address when it was in a frame), bump the badge; for a frame, show the notice in the page |
+| `overlayUndo` | notice's **Undo** | Worker tells every frame of the tab to put back what it closed |
 | `overlayPref` | notice's **Never on this site** | Move this site from `overlaySites` to `overlayNever` |
 | `continue` | `blocked.html` | Open the destination; can also allow the source, trust the destination, or unblock it |
 | `goBack` | `blocked.html` | Return the tab to the page it came from |
@@ -4188,8 +4528,9 @@ message, so two writers never overwrite each other.
 The last two groups only work from the extension's own pages (`isExtensionPage`). A web page can't
 send them. Content-script messages can only affect the sender's own site.
 
-One message goes the other way: the toolbar popup sends `closeOverlaysNow` to the page's top frame,
-and `overlay.js` answers `{ closed: n }`.
+The toolbar popup sends `closeOverlays` `{ tabId }`. The worker (`closeOverlaysInTab`) then sends
+`closeOverlaysNow` to every frame of that tab, each `overlay.js` answers `{ closed: n }`, and the
+worker returns the total.
 
 ## Dynamic network rules (built by `applyRules()`)
 
@@ -4287,7 +4628,9 @@ listener never saw, such as pages served by a site's own service worker.
 **On-screen popups**: `countOverlays()` adds to `overlayCounts[site]` through a queue, so counts
 from several tabs don't overwrite each other. At `OVERLAY_LEARN_AT` (3) it adds the site to
 `overlaySites`, unless the site is on `overlayNever`. `overlayClosed` logs a `kind: 'overlay'`
-history entry for the page.
+history entry (with the frame's address when it came from a frame) and, for a frame, shows the
+notice in the page. `closeOverlaysInTab()` sends `closeOverlaysNow` to every frame
+(`webNavigation.getAllFrames`) and adds up the answers.
 
 **History**: `logBlock()` merges repeats (same kind + URL + source site → `count += times`), keeps the
 newest first, trims to `logLimit`, and limits each tab to 40 entries a minute so a spammy page
@@ -4304,9 +4647,14 @@ and makes no decisions. It intercepts the calls that open popups and asks `guard
 
 - It saves the native functions (`dispatchEvent`, `URL`, property getters) at startup, so the page
   can't fake them later.
-- **`allowed(url)`** dispatches a `__strictshield_q` CustomEvent on `window`. `guard.js` answers
+- **`allowed(url)`** dispatches a `__strictshield_q` CustomEvent. `guard.js` answers
   synchronously with `__strictshield_r` (`'allow'` / `'block'`). If no answer comes back (for example
   after the extension was reloaded), the call is allowed and the worker remains the safety net.
+- **`listenerElement()`**: while a click event is being handled, `window.event.currentTarget` is the
+  element whose own listener is running. The question is dispatched **on that element** (it bubbles
+  to `window`, where `guard.js` listens), so `guard.js` learns which element opened the popup.
+  Listeners on `document` or `window` give no element: any click reaches those, so they prove
+  nothing about the element clicked.
 - It wraps `window.open` with a `Proxy`, so the function still looks native. It also patches the
   `contentWindow` / `contentDocument` getters, so a freshly created iframe's `window.open` is
   wrapped before the page can use it.
@@ -4343,14 +4691,20 @@ Runs in the extension's isolated world in every frame.
   back if a page removes it.
 - **Toast** (top frame only): a closed shadow root, so page CSS and scripts can't reach it. Repeats
   of the same site are grouped with a `×N` badge, at most 3 toasts show, and they auto-hide after
-  10 s. The buttons check `isTrusted`, so a page can't click them itself. `overlay.js` can pass its
-  own title, text and buttons (`actions`).
-- **`self.StrictShieldContent`**: what `overlay.js` uses: `config()`, `onConfig()`, `toast()`,
-  `send()`, `topSite`, and `isOwn()` (so the toast is never treated as a popup).
+  10 s. The buttons check `isTrusted`, so a page can't click them itself. For `kind: 'overlay'`
+  (from `overlay.js`, or relayed by the worker for a frame) the buttons are **Undo** and **Never on
+  this site**; both go through the worker so every frame is reached.
+- **Blocked-click evidence**: when a popup is blocked, the element the question came from (or the
+  link that was clicked) is passed to `onBlockedClick` listeners.
+- **`self.StrictShieldContent`**, in every frame: what `overlay.js` uses: `isTop`, `config()`,
+  `onConfig()`, `onBlockedClick()`, `send()`, `topSite`, and in the top frame `toast()` and `isOwn()`
+  (so the toast is never treated as a popup).
 """),
         ("extension/src/content/overlay.js", """\
-The on-screen popup closer. It runs in the top frame only, after `guard.js`, and uses
-`self.StrictShieldContent` for settings and the notice.
+The on-screen popup closer. It runs in every frame, after `guard.js`, and uses
+`self.StrictShieldContent` for settings, the notice and blocked-click evidence. Page-level popups
+(modals, backdrops, banners) are only looked for in the top frame; layers over players in every
+frame. Captcha, payment and sign-in frames, and frames under 200×120 px, are skipped.
 
 - **`mode()`**: `'close'` on sites in `overlaySites` (or every site in `everywhere` mode), `'learn'`
   elsewhere in `auto` mode, `'off'` for paused or `overlayNever` sites, or when the setting is off.
@@ -4376,10 +4730,27 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
 - **`scan()`**: up to 4 rounds, because closing a modal often reveals its backdrop or a cookie bar.
   In learn mode it only reports new popups (`overlaySeen`). Each closed popup is logged
   immediately (`overlayClosed`), then one notice is shown with **Undo** and **Never on this site**.
-- **When it scans**: in close mode, a `MutationObserver` (at most every 600 ms); in every mode,
-  timed checks from 0.8 s to 60 s after load, on scroll, and when the mouse leaves the page (exit
-  intent). It also answers `closeOverlaysNow` from the toolbar popup, which skips the "opened by
-  you" check.
+- **`players()`**: visible `<video>` and `<iframe>` elements of at least 200×120 px. In the top
+  frame, the 6 largest. In a frame, only its main content (a video filling 30% or more of the frame,
+  else such a nested frame, else the frame's own viewport).
+- **`findCovers()`**: for each player, `elementsFromPoint` at 5 points inside it. Everything painted
+  above the player there is traced up to its layer (`layerOf`: the highest ancestor that doesn't
+  also hold the player) and judged by `classifyCover()`:
+  `adframe` (another frame over a video inside a player frame, unless captcha/payment/sign-in or
+  the IMA ad-controls frame), `adlink` (a link layer to a site that is neither the frame's nor the
+  page's, covering enough of the player), `trap` (bare and invisible, covering 70% or more: over an
+  embedded frame always, over a video only with `z-index` ≥ 9999 or attached to `<body>` in a
+  frame). Layers with controls, media or a player-like class/id (`PLAYER_NAME`) return `null`.
+- **`onBlockedClick`**: proof from a blocked popup. From the element that opened it, climb while
+  the ancestors are bare; the outermost one that is positioned and lies over half the frame or 60%
+  of a player is the trap. Invisible: hidden at once. Visible: after the second time. Visible
+  links: never.
+- **Frames and the notice**: a frame can't show a notice, so the worker shows it in the page when
+  it receives `overlayClosed` from a frame. **Undo** is broadcast to every frame (`overlayUndo`).
+- **When it scans**: in close mode, a `MutationObserver` (at most every 600 ms, 1 s in frames); in
+  every mode, timed checks from 0.8 s to 60 s after load, on scroll, and when the mouse leaves the
+  page (exit intent). Not while a mouse button is held, so drag shields aren't judged. It also
+  answers `closeOverlaysNow`, which skips the "opened by you" check.
 """),
         ("extension/src/content/cosmetic.js", """\
 Defines `self.StrictCosmetic`, the list of CSS selectors `guard.js` hides. It is kept narrow on
@@ -4416,8 +4787,8 @@ Edit the `.txt` files, then run `node tools/build-rules.mjs` to regenerate the J
   effect on the next page load.
 - **Auto-close on-screen popups**: on adds the site to `overlaySites` and removes it from
   `overlayNever`; off does the opposite, so learning won't turn it back on.
-- **Close popups on this page now** sends `closeOverlaysNow` to the page. If anything was closed
-  and the mode is `auto`, the site is added to `overlaySites`.
+- **Close popups on this page now** sends `closeOverlays` to the worker, which asks every frame of
+  the tab. If anything was closed and the mode is `auto`, the site is added to `overlaySites`.
 - It re-renders on every `storage.onChanged`, so it stays live while open.
 """),
         ("extension/pages/options.html", "Settings, with four tabs selected by URL hash (`#protection`, `#lists`, `#history`, `#how`). Section ids are `sec-…` so the browser doesn't scroll to them."),
@@ -4455,15 +4826,17 @@ One HTTP server that plays several sites. Chrome is started with `--host-resolve
 `site-a.test`, `site-b.test`, `site-c.test`, `doubleclick.net` and `www.google-analytics.com` all
 resolve to `127.0.0.1`, and the server routes on the `Host` header. `site-a.test/` has one button
 or link for each popup trick. `OVERLAY_PAGES` (`/overlay`, `/overlay-plain`, `/user-modal`, `/trap`,
-`/dialog`) imitate heavy-popup sites on any `*.test` host. `static.site-c.test/widget.js` is a
+`/dialog`) imitate heavy-popup sites on any `*.test` host. `/embed-host` embeds `/player` (a video
+with its own click layer and control bar, plus per-case layers on top) or `/wrapper` (a frame
+whose player is one frame deeper) from another site. `static.site-c.test/widget.js` is a
 third-party script blocked only by your custom list; its name avoids "ad" so a browser's own
 blocker (e.g. Brave Shields) can't interfere.
 """),
         ("test/run.mjs", """\
 Starts Chromium with the unpacked extension (`enableExtensions`), waits for the service worker to
-finish installing, then runs 40 cases in groups: network and cosmetic, the same-site rule, popups,
-memory, Balanced mode, lists, on-screen popups. `deepText()` reads closed shadow roots through the DevTools protocol
-to check the toast. `setConfig()` writes storage from inside the worker, then waits for
+finish installing, then runs 48 cases in groups: network and cosmetic, the same-site rule, popups,
+memory, Balanced mode, lists, on-screen popups, embedded players. `deepText()` reads closed shadow
+roots through the DevTools protocol to check the toast, and `clickInShadow()` presses its buttons. `setConfig()` writes storage from inside the worker, then waits for
 `rulesChain` so the network rules are updated before the next page loads. A
 240-second deadline kills the run if the browser hangs.
 """),
@@ -4591,14 +4964,16 @@ extension/_metadata/
 
 ### 2.27 test/server.mjs
 
-[Open file](test/server.mjs) · 133 lines
+[Open file](test/server.mjs) · 189 lines
 
 
 One HTTP server that plays several sites. Chrome is started with `--host-resolver-rules`, so
 `site-a.test`, `site-b.test`, `site-c.test`, `doubleclick.net` and `www.google-analytics.com` all
 resolve to `127.0.0.1`, and the server routes on the `Host` header. `site-a.test/` has one button
 or link for each popup trick. `OVERLAY_PAGES` (`/overlay`, `/overlay-plain`, `/user-modal`, `/trap`,
-`/dialog`) imitate heavy-popup sites on any `*.test` host. `static.site-c.test/widget.js` is a
+`/dialog`) imitate heavy-popup sites on any `*.test` host. `/embed-host` embeds `/player` (a video
+with its own click layer and control bar, plus per-case layers on top) or `/wrapper` (a frame
+whose player is one frame deeper) from another site. `static.site-c.test/widget.js` is a
 third-party script blocked only by your custom list; its name avoids "ad" so a browser's own
 blocker (e.g. Brave Shields) can't interfere.
 
@@ -4613,7 +4988,7 @@ import http from 'node:http';
 
 const article = '<main id="content">' + ('<p>' + 'Real article text. '.repeat(40) + '</p>').repeat(30) + '</main>';
 
-// On-screen popup test pages, served on every *.test host.
+// On-screen popup and embedded-player test pages, served on every *.test host.
 const OVERLAY_PAGES = {
   // Newsletter modal + dimmed backdrop + cookie bar, the way heavy-popup sites do it.
   '/overlay': () => `${article}<script>
@@ -4664,6 +5039,62 @@ const OVERLAY_PAGES = {
       document.body.append(a);
     }, 300);
   </script>`,
+  // A page that embeds a video player from another site. ?top=trap also puts
+  // an invisible click layer over the embedded frame, in the page itself.
+  '/embed-host': (port, url, host) => {
+    const other = host === 'site-a.test' ? 'site-b.test' : 'site-a.test';
+    const kind = url.searchParams.get('case') || 'covers';
+    const trap = url.searchParams.get('top') === 'trap'
+      ? `<div id="toptrap" style="position:absolute;inset:0" onclick="window.open('http://site-c.test:${port}/x-top')"></div>` : '';
+    return `<div id="wrap" style="position:relative;width:640px;height:360px">
+        <iframe id="player" src="http://${other}:${port}/${url.searchParams.get('frame') || 'player'}?case=${kind}" width="640" height="360" style="border:0;display:block"></iframe>${trap}
+      </div>${article}`;
+  },
+  // A wrapper frame: the real player is one frame deeper, on a third site,
+  // and the wrapper lays an invisible click layer over it.
+  '/wrapper': (port) => `<style>html,body{margin:0;height:100%}#w{position:relative;width:100%;height:100%}</style>
+    <div id="w">
+      <iframe id="inner" src="http://site-c.test:${port}/player?case=none" style="width:100%;height:100%;border:0;display:block"></iframe>
+      <div id="wraptrap" style="position:absolute;inset:0" onclick="window.open('http://site-c.test:${port}/x-wrap')"></div>
+    </div>`,
+  // The player inside that frame: a video, its own click layer (#tap) and
+  // control bar (#bar), plus whatever the case adds on top.
+  '/player': (port, url) => {
+    const C = `http://site-c.test:${port}`;
+    const extra = {
+      // What popup-heavy players lay over the video: an invisible click trap on
+      // <body>, another frame, and a link layer to another site.
+      covers: `setTimeout(() => {
+        const trap = Object.assign(document.createElement('div'), { id: 'trap' });
+        trap.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483647';
+        trap.onclick = () => window.open('${C}/x-trap');
+        document.body.append(trap);
+        const frame = Object.assign(document.createElement('iframe'), { id: 'overframe', src: '${C}/x-frame' });
+        frame.style.cssText = 'position:absolute;top:20%;left:25%;width:50%;height:50%;z-index:50;border:0';
+        const link = Object.assign(document.createElement('a'), { id: 'overlink', href: '${C}/x-link', target: '_blank' });
+        link.style.cssText = 'position:absolute;inset:0;z-index:40';
+        link.innerHTML = '<img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="width:100%;height:100%">';
+        document.getElementById('p').append(frame, link);
+      }, 300);`,
+      // An invisible layer inside the player that opens a popup on every click.
+      soft: `const t = Object.assign(document.createElement('div'), { id: 'softtrap' });
+        t.style.cssText = 'position:absolute;inset:0;z-index:5';
+        t.onclick = () => window.open('${C}/x-soft');
+        document.getElementById('p').append(t);`,
+      // The real play button, which opens a popup on the first click only.
+      dual: `const b = Object.assign(document.createElement('div'), { id: 'bigplay' });
+        b.style.cssText = 'position:absolute;inset:0;z-index:5;background:#123';
+        b.onclick = () => { if (!window.__popped) { window.__popped = 1; window.open('${C}/x-dual'); return; } window.__played = 1; b.remove(); };
+        document.getElementById('p').append(b);`
+    }[url.searchParams.get('case')] || '';
+    return `<style>html,body{margin:0;height:100%;background:#000}#p{position:relative;width:100%;height:100%}video{width:100%;height:100%;display:block}</style>
+      <div id="p">
+        <video id="v" muted></video>
+        <div id="tap" style="position:absolute;inset:0;z-index:1" onclick="window.__toggled=(window.__toggled||0)+1"></div>
+        <div id="bar" style="position:absolute;left:0;right:0;bottom:0;height:40px;z-index:2;background:rgba(0,0,0,.6)"><button id="play">Play</button><input type="range"></div>
+      </div>
+      <script>${extra}</script>`;
+  },
   // A modal <dialog> shown on load.
   '/dialog': () => `${article}<dialog id="dlg"><p>We noticed you are using an ad blocker. Please allowlist us.</p><button>OK</button></dialog><script>
     setTimeout(() => document.getElementById('dlg').showModal(), 300);
@@ -4696,7 +5127,7 @@ export function startServer() {
       return res.end('window.customAdLoaded = true;');
     }
 
-    if (host.endsWith('.test') && OVERLAY_PAGES[url.pathname]) return html(OVERLAY_PAGES[url.pathname](port));
+    if (host.endsWith('.test') && OVERLAY_PAGES[url.pathname]) return html(OVERLAY_PAGES[url.pathname](port, url, host));
 
     if (host === 'site-a.test') {
       switch (url.pathname) {
@@ -4742,13 +5173,13 @@ export function startServer() {
 
 ### 2.28 test/run.mjs
 
-[Open file](test/run.mjs) · 485 lines
+[Open file](test/run.mjs) · 590 lines
 
 
 Starts Chromium with the unpacked extension (`enableExtensions`), waits for the service worker to
-finish installing, then runs 40 cases in groups: network and cosmetic, the same-site rule, popups,
-memory, Balanced mode, lists, on-screen popups. `deepText()` reads closed shadow roots through the DevTools protocol
-to check the toast. `setConfig()` writes storage from inside the worker, then waits for
+finish installing, then runs 48 cases in groups: network and cosmetic, the same-site rule, popups,
+memory, Balanced mode, lists, on-screen popups, embedded players. `deepText()` reads closed shadow
+roots through the DevTools protocol to check the toast, and `clickInShadow()` presses its buttons. `setConfig()` writes storage from inside the worker, then waits for
 `rulesChain` so the network rules are updated before the next page loads. A
 240-second deadline kills the run if the browser hangs.
 
@@ -5228,6 +5659,111 @@ await test('"every site" mode closes popups on any site', async (page) => {
   await page.waitForFunction(() => !document.getElementById('modal'), { timeout: 5000 });
   const { lists } = await overlayState();
   assert(!lists.overlaySites.includes('site-b.test'), 'every-site mode should not need the list');
+});
+await setConfig({ settings: { overlayMode: 'auto' }, lists: { overlaySites: [], overlayNever: [] } });
+
+console.log('\nEmbedded players (frames)');
+await inWorker(() => chrome.storage.local.remove('overlayCounts'));
+const frameOf = async (page, part) => {
+  for (let i = 0; i < 50; i++) {
+    const f = page.frames().find((x) => x.url().includes(part));
+    if (f) return f;
+    await sleep(100);
+  }
+  throw new Error(`no frame with ${part}`);
+};
+const shownInFrame = (frame, id) => frame.evaluate((i) => {
+  const e = document.getElementById(i);
+  return !!e && e.isConnected && getComputedStyle(e).display !== 'none';
+}, id);
+const waitShownInFrame = async (frame, id, want, ms = 6000) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await shownInFrame(frame, id) === want) return;
+    await sleep(100);
+  }
+  throw new Error(`#${id} is still ${want ? 'hidden' : 'shown'} in the frame`);
+};
+const COVERS = ['trap', 'overframe', 'overlink'];
+
+await test('popups over a video inside a frame count for the page\'s site and are removed once it is learned', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  for (const id of COVERS) await waitShownInFrame(frame, id, false);
+  const { lists, log } = await overlayState();
+  assert(lists.overlaySites.includes('site-a.test'), `not learned: ${lists.overlaySites}`);
+  const e = log.find((x) => x.kind === 'overlay' && x.url.includes('/player') && x.fromSite === 'site-a.test');
+  assert(e, 'frame closure not in the history');
+});
+
+await test('the video, its controls and its own click layer stay and work', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  for (const id of COVERS) await waitShownInFrame(frame, id, false);
+  for (const id of ['v', 'bar', 'tap']) assert(await shownInFrame(frame, id), `#${id} was hidden`);
+  await frame.click('#tap');
+  assert(await frame.evaluate(() => window.__toggled) === 1, 'click did not reach the player');
+});
+
+await test('the page shows the notice for a frame, and Undo puts the layers back', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  await waitShownInFrame(frame, 'trap', false);
+  await sleep(400);
+  assert((await deepText(page)).includes('Popup closed'), 'no notice in the page');
+  await clickInShadow(page, 'Undo');
+  await waitShownInFrame(frame, 'trap', true);
+});
+
+await test('invisible layer over an embedded frame, in the page itself, is removed', async (page) => {
+  await load(page, A + '/embed-host?case=none&top=trap');
+  await page.waitForFunction(() => getComputedStyle(document.getElementById('toptrap')).display === 'none', { timeout: 6000 });
+  assert(await page.evaluate(() => getComputedStyle(document.getElementById('player')).display) !== 'none', 'the player frame was hidden');
+});
+
+await test('wrapper frame: invisible layer over the inner player frame is removed, the inner player stays', async (page) => {
+  await load(page, A + '/embed-host?frame=wrapper');
+  const wrapper = await frameOf(page, '/wrapper');
+  await waitShownInFrame(wrapper, 'wraptrap', false);
+  assert(await shownInFrame(wrapper, 'inner'), 'the inner player frame was hidden');
+  const inner = await frameOf(page, '/player');
+  for (const id of ['v', 'bar', 'tap']) assert(await shownInFrame(inner, id), `#${id} was hidden`);
+});
+
+await test('a layer whose click opened a blocked popup is removed, even on a site not learned', async (page) => {
+  await load(page, B + '/embed-host?case=soft');
+  const frame = await frameOf(page, '/player');
+  await sleep(1200);
+  assert(await shownInFrame(frame, 'softtrap'), 'removed before it proved to be a trap');
+  await frame.click('#softtrap');
+  await noTabWith('/x-soft', 800);
+  await waitShownInFrame(frame, 'softtrap', false);
+  await frame.click('#tap');
+  assert(await frame.evaluate(() => window.__toggled) === 1, 'next click did not reach the player');
+});
+
+await test('a visible play button that opens a popup on the first click only is kept', async (page) => {
+  await load(page, B + '/embed-host?case=dual');
+  const frame = await frameOf(page, '/player');
+  await frame.click('#bigplay');
+  await noTabWith('/x-dual', 800);
+  assert(await shownInFrame(frame, 'bigplay'), 'play button removed after one click');
+  await frame.click('#bigplay');
+  assert(await frame.evaluate(() => window.__played) === 1, 'second click did not play');
+});
+
+await setConfig({ settings: { overlayMode: 'off' } });
+await test('"Close popups on this page now" also reaches embedded players', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  await sleep(1500);
+  assert(await shownInFrame(frame, 'trap'), 'closed while auto-close is off');
+  const res = await inWorker(async (prefix) => {
+    const tab = (await chrome.tabs.query({})).find((t) => (t.url || '').startsWith(prefix));
+    return closeOverlaysInTab(tab.id);
+  }, A + '/embed-host');
+  assert(res.reached && res.closed >= 3, JSON.stringify(res));
+  for (const id of COVERS) assert(!(await shownInFrame(frame, id)), `#${id} is still there`);
 });
 await setConfig({ settings: { overlayMode: 'auto' }, lists: { overlaySites: [], overlayNever: [] } });
 

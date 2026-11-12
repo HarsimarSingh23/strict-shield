@@ -6,6 +6,8 @@
  * This file wraps those APIs and asks the isolated content script (guard.js)
  * for a verdict through a synchronous DOM event. It holds no settings itself;
  * the service worker independently closes anything that slips past.
+ * The question is sent from the element whose click listener is opening the
+ * popup, which tells overlay.js which element on the page is a click trap.
  */
 (() => {
   'use strict';
@@ -34,7 +36,15 @@
   const formTarget = getDesc(HTMLFormElement.prototype, 'target').get;
   const AnchorEl = HTMLAnchorElement;
   const FormEl = HTMLFormElement;
+  const ElementCtor = Element;
+  const doc = document;
   const toLower = String.prototype.toLowerCase;
+  const ownerDoc = getDesc(Node.prototype, 'ownerDocument').get;
+  const evType = getDesc(Event.prototype, 'type').get;
+  const evCurrentTarget = getDesc(Event.prototype, 'currentTarget').get;
+  const currentEvent = (getDesc(win, 'event') || getDesc(Window.prototype, 'event') || {}).get;
+  const CLICKS = { __proto__: null, click: 1, auxclick: 1, dblclick: 1, mousedown: 1, mouseup: 1,
+    pointerdown: 1, pointerup: 1, touchstart: 1, touchend: 1 };
 
   let answer = null;
   apply(listen, win, [ANSWER, (e) => { answer = e.detail; }, true]);
@@ -48,15 +58,36 @@
     }
   }
 
+  // The element whose own click listener is running right now, if there is
+  // one. (Listeners on document or window give null: any click reaches those.)
+  function listenerElement() {
+    try {
+      const ev = currentEvent ? apply(currentEvent, win, []) : null;
+      if (!ev || !CLICKS[apply(evType, ev, [])]) return null;
+      const el = apply(evCurrentTarget, ev, []);
+      if (!(el instanceof ElementCtor) || !apply(isConnected, el, []) || apply(ownerDoc, el, []) !== doc) return null;
+      return el;
+    } catch {
+      return null;
+    }
+  }
+
+  function ask(target, detail) {
+    try {
+      apply(dispatch, target, [new CustomEvt(ASK, { detail, bubbles: true, composed: true })]);
+    } catch { /* no answer */ }
+  }
+
   // Synchronous round trip to guard.js. No answer (extension reloaded,
   // paused, ...) means allow: the service worker is still the backstop.
+  // The question is sent from the element whose click listener is opening
+  // the popup, so guard.js can tell which element is a click trap.
   function allowed(url, via) {
     answer = null;
-    try {
-      apply(dispatch, win, [new CustomEvt(ASK, { detail: stringify({ url, via }) })]);
-    } catch {
-      return true;
-    }
+    const detail = stringify({ url, via });
+    const el = listenerElement();
+    if (el) ask(el, detail);
+    if (answer === null) ask(win, detail);
     return answer !== 'block';
   }
 

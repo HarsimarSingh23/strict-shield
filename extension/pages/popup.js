@@ -92,8 +92,9 @@
   $('zap').onclick = async () => {
     $('zap').disabled = true;
     $('zapResult').textContent = 'Looking…';
-    const r = await chrome.tabs.sendMessage(tab.id, { type: 'closeOverlaysNow' }, { frameId: 0 }).catch(() => null);
-    if (!r) {
+    // The worker asks the page and every frame inside it (embedded players).
+    const r = await send({ type: 'closeOverlays', tabId: tab.id }).catch(() => null);
+    if (!r || !r.reached) {
       $('zapResult').textContent = 'Reload the page first, then try again.';
     } else if (!r.closed) {
       $('zapResult').textContent = 'Nothing covering this page.';

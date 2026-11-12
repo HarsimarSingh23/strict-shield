@@ -27,6 +27,7 @@ WHAT IT BLOCKS
 • Redirects — a page trying to send your tab to another site is stopped. You stay on the page you were reading, with Open once and Always allow buttons
 • Leftover ad boxes — hidden so pages look clean
 • On-screen popups — newsletter boxes, cookie walls, "turn off your ad blocker" messages, notification prompts and invisible click traps are closed automatically on sites that keep showing them. It presses their own close or "No thanks" / "Reject all" button (never Accept or Subscribe), or hides them, and gives you scrolling back. One click closes them on any page
+• Embedded video players — invisible click layers, ad frames and link overlays lying on top of a video are removed, inside frames too, so your click reaches the player
 
 YOU STAY IN CONTROL
 • Addresses you type, bookmarks and the back button are never blocked
