@@ -7,7 +7,7 @@ import http from 'node:http';
 
 const article = '<main id="content">' + ('<p>' + 'Real article text. '.repeat(40) + '</p>').repeat(30) + '</main>';
 
-// On-screen popup test pages, served on every *.test host.
+// On-screen popup and embedded-player test pages, served on every *.test host.
 const OVERLAY_PAGES = {
   // Newsletter modal + dimmed backdrop + cookie bar, the way heavy-popup sites do it.
   '/overlay': () => `${article}<script>
@@ -58,6 +58,62 @@ const OVERLAY_PAGES = {
       document.body.append(a);
     }, 300);
   </script>`,
+  // A page that embeds a video player from another site. ?top=trap also puts
+  // an invisible click layer over the embedded frame, in the page itself.
+  '/embed-host': (port, url, host) => {
+    const other = host === 'site-a.test' ? 'site-b.test' : 'site-a.test';
+    const kind = url.searchParams.get('case') || 'covers';
+    const trap = url.searchParams.get('top') === 'trap'
+      ? `<div id="toptrap" style="position:absolute;inset:0" onclick="window.open('http://site-c.test:${port}/x-top')"></div>` : '';
+    return `<div id="wrap" style="position:relative;width:640px;height:360px">
+        <iframe id="player" src="http://${other}:${port}/${url.searchParams.get('frame') || 'player'}?case=${kind}" width="640" height="360" style="border:0;display:block"></iframe>${trap}
+      </div>${article}`;
+  },
+  // A wrapper frame: the real player is one frame deeper, on a third site,
+  // and the wrapper lays an invisible click layer over it.
+  '/wrapper': (port) => `<style>html,body{margin:0;height:100%}#w{position:relative;width:100%;height:100%}</style>
+    <div id="w">
+      <iframe id="inner" src="http://site-c.test:${port}/player?case=none" style="width:100%;height:100%;border:0;display:block"></iframe>
+      <div id="wraptrap" style="position:absolute;inset:0" onclick="window.open('http://site-c.test:${port}/x-wrap')"></div>
+    </div>`,
+  // The player inside that frame: a video, its own click layer (#tap) and
+  // control bar (#bar), plus whatever the case adds on top.
+  '/player': (port, url) => {
+    const C = `http://site-c.test:${port}`;
+    const extra = {
+      // What popup-heavy players lay over the video: an invisible click trap on
+      // <body>, another frame, and a link layer to another site.
+      covers: `setTimeout(() => {
+        const trap = Object.assign(document.createElement('div'), { id: 'trap' });
+        trap.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483647';
+        trap.onclick = () => window.open('${C}/x-trap');
+        document.body.append(trap);
+        const frame = Object.assign(document.createElement('iframe'), { id: 'overframe', src: '${C}/x-frame' });
+        frame.style.cssText = 'position:absolute;top:20%;left:25%;width:50%;height:50%;z-index:50;border:0';
+        const link = Object.assign(document.createElement('a'), { id: 'overlink', href: '${C}/x-link', target: '_blank' });
+        link.style.cssText = 'position:absolute;inset:0;z-index:40';
+        link.innerHTML = '<img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="width:100%;height:100%">';
+        document.getElementById('p').append(frame, link);
+      }, 300);`,
+      // An invisible layer inside the player that opens a popup on every click.
+      soft: `const t = Object.assign(document.createElement('div'), { id: 'softtrap' });
+        t.style.cssText = 'position:absolute;inset:0;z-index:5';
+        t.onclick = () => window.open('${C}/x-soft');
+        document.getElementById('p').append(t);`,
+      // The real play button, which opens a popup on the first click only.
+      dual: `const b = Object.assign(document.createElement('div'), { id: 'bigplay' });
+        b.style.cssText = 'position:absolute;inset:0;z-index:5;background:#123';
+        b.onclick = () => { if (!window.__popped) { window.__popped = 1; window.open('${C}/x-dual'); return; } window.__played = 1; b.remove(); };
+        document.getElementById('p').append(b);`
+    }[url.searchParams.get('case')] || '';
+    return `<style>html,body{margin:0;height:100%;background:#000}#p{position:relative;width:100%;height:100%}video{width:100%;height:100%;display:block}</style>
+      <div id="p">
+        <video id="v" muted></video>
+        <div id="tap" style="position:absolute;inset:0;z-index:1" onclick="window.__toggled=(window.__toggled||0)+1"></div>
+        <div id="bar" style="position:absolute;left:0;right:0;bottom:0;height:40px;z-index:2;background:rgba(0,0,0,.6)"><button id="play">Play</button><input type="range"></div>
+      </div>
+      <script>${extra}</script>`;
+  },
   // A modal <dialog> shown on load.
   '/dialog': () => `${article}<dialog id="dlg"><p>We noticed you are using an ad blocker. Please allowlist us.</p><button>OK</button></dialog><script>
     setTimeout(() => document.getElementById('dlg').showModal(), 300);
@@ -90,7 +146,7 @@ export function startServer() {
       return res.end('window.customAdLoaded = true;');
     }
 
-    if (host.endsWith('.test') && OVERLAY_PAGES[url.pathname]) return html(OVERLAY_PAGES[url.pathname](port));
+    if (host.endsWith('.test') && OVERLAY_PAGES[url.pathname]) return html(OVERLAY_PAGES[url.pathname](port, url, host));
 
     if (host === 'site-a.test') {
       switch (url.pathname) {

@@ -89,6 +89,9 @@ disagree.
 | Cookie bar with "Accept all" / "Reject all" | `overlay.js` | Presses **Reject all**, never Accept |
 | "Turn off your ad blocker" wall with no close button | `overlay.js` | Hidden; scroll lock and blur removed |
 | Invisible full-page link layer (click trap) | `overlay.js` | Hidden |
+| Embedded player frame: invisible layer on `<body>`, ad frame or foreign link layer over the video | `overlay.js` inside that frame | Hidden; video, controls and the player's own click layer stay; notice in the page |
+| Invisible layer over an embedded frame, in the page or in a wrapper frame | `overlay.js` | Hidden |
+| Any empty layer whose own click handler opened a popup that got blocked | `guard-main.js` → `guard.js` → `overlay.js` | Hidden at once if invisible, after the second time if visible |
 | Login box that opens right after you click "Log in" | nobody | Left open (it appeared within 1.5 s of your click) |
 | You type a URL, use a bookmark, Back/Forward, reload | nobody | Always allowed |
 | Domain on your "Always blocked" list | dynamic DNR redirect rule | `blocked.html?kind=blocklist` |
@@ -140,7 +143,8 @@ message, so two writers never overwrite each other.
 | `openOnce` | toast | Open the blocked URL once (new tab or same tab) |
 | `allowSource` | toast | Add this page's site to `allowOutbound`, then open the URL |
 | `overlaySeen` | `overlay.js` (learn mode) | Count unsolicited popups for this site; at 3, add it to `overlaySites` |
-| `overlayClosed` | `overlay.js` | Log one closed on-screen popup for this page, bump the badge |
+| `overlayClosed` | `overlay.js` (any frame) | Log one closed on-screen popup (the frame's address when it was in a frame), bump the badge; for a frame, show the notice in the page |
+| `overlayUndo` | notice's **Undo** | Worker tells every frame of the tab to put back what it closed |
 | `overlayPref` | notice's **Never on this site** | Move this site from `overlaySites` to `overlayNever` |
 | `continue` | `blocked.html` | Open the destination; can also allow the source, trust the destination, or unblock it |
 | `goBack` | `blocked.html` | Return the tab to the page it came from |
@@ -150,8 +154,9 @@ message, so two writers never overwrite each other.
 The last two groups only work from the extension's own pages (`isExtensionPage`). A web page can't
 send them. Content-script messages can only affect the sender's own site.
 
-One message goes the other way: the toolbar popup sends `closeOverlaysNow` to the page's top frame,
-and `overlay.js` answers `{ closed: n }`.
+The toolbar popup sends `closeOverlays` `{ tabId }`. The worker (`closeOverlaysInTab`) then sends
+`closeOverlaysNow` to every frame of that tab, each `overlay.js` answers `{ closed: n }`, and the
+worker returns the total.
 
 ## Dynamic network rules (built by `applyRules()`)
 
@@ -249,7 +254,9 @@ listener never saw, such as pages served by a site's own service worker.
 **On-screen popups**: `countOverlays()` adds to `overlayCounts[site]` through a queue, so counts
 from several tabs don't overwrite each other. At `OVERLAY_LEARN_AT` (3) it adds the site to
 `overlaySites`, unless the site is on `overlayNever`. `overlayClosed` logs a `kind: 'overlay'`
-history entry for the page.
+history entry (with the frame's address when it came from a frame) and, for a frame, shows the
+notice in the page. `closeOverlaysInTab()` sends `closeOverlaysNow` to every frame
+(`webNavigation.getAllFrames`) and adds up the answers.
 
 **History**: `logBlock()` merges repeats (same kind + URL + source site → `count += times`), keeps the
 newest first, trims to `logLimit`, and limits each tab to 40 entries a minute so a spammy page
@@ -266,9 +273,14 @@ and makes no decisions. It intercepts the calls that open popups and asks `guard
 
 - It saves the native functions (`dispatchEvent`, `URL`, property getters) at startup, so the page
   can't fake them later.
-- **`allowed(url)`** dispatches a `__strictshield_q` CustomEvent on `window`. `guard.js` answers
+- **`allowed(url)`** dispatches a `__strictshield_q` CustomEvent. `guard.js` answers
   synchronously with `__strictshield_r` (`'allow'` / `'block'`). If no answer comes back (for example
   after the extension was reloaded), the call is allowed and the worker remains the safety net.
+- **`listenerElement()`**: while a click event is being handled, `window.event.currentTarget` is the
+  element whose own listener is running. The question is dispatched **on that element** (it bubbles
+  to `window`, where `guard.js` listens), so `guard.js` learns which element opened the popup.
+  Listeners on `document` or `window` give no element: any click reaches those, so they prove
+  nothing about the element clicked.
 - It wraps `window.open` with a `Proxy`, so the function still looks native. It also patches the
   `contentWindow` / `contentDocument` getters, so a freshly created iframe's `window.open` is
   wrapped before the page can use it.
@@ -305,14 +317,20 @@ Runs in the extension's isolated world in every frame.
   back if a page removes it.
 - **Toast** (top frame only): a closed shadow root, so page CSS and scripts can't reach it. Repeats
   of the same site are grouped with a `×N` badge, at most 3 toasts show, and they auto-hide after
-  10 s. The buttons check `isTrusted`, so a page can't click them itself. `overlay.js` can pass its
-  own title, text and buttons (`actions`).
-- **`self.StrictShieldContent`**: what `overlay.js` uses: `config()`, `onConfig()`, `toast()`,
-  `send()`, `topSite`, and `isOwn()` (so the toast is never treated as a popup).
+  10 s. The buttons check `isTrusted`, so a page can't click them itself. For `kind: 'overlay'`
+  (from `overlay.js`, or relayed by the worker for a frame) the buttons are **Undo** and **Never on
+  this site**; both go through the worker so every frame is reached.
+- **Blocked-click evidence**: when a popup is blocked, the element the question came from (or the
+  link that was clicked) is passed to `onBlockedClick` listeners.
+- **`self.StrictShieldContent`**, in every frame: what `overlay.js` uses: `isTop`, `config()`,
+  `onConfig()`, `onBlockedClick()`, `send()`, `topSite`, and in the top frame `toast()` and `isOwn()`
+  (so the toast is never treated as a popup).
 """),
         ("extension/src/content/overlay.js", """\
-The on-screen popup closer. It runs in the top frame only, after `guard.js`, and uses
-`self.StrictShieldContent` for settings and the notice.
+The on-screen popup closer. It runs in every frame, after `guard.js`, and uses
+`self.StrictShieldContent` for settings, the notice and blocked-click evidence. Page-level popups
+(modals, backdrops, banners) are only looked for in the top frame; layers over players in every
+frame. Captcha, payment and sign-in frames, and frames under 200×120 px, are skipped.
 
 - **`mode()`**: `'close'` on sites in `overlaySites` (or every site in `everywhere` mode), `'learn'`
   elsewhere in `auto` mode, `'off'` for paused or `overlayNever` sites, or when the setting is off.
@@ -338,10 +356,27 @@ The on-screen popup closer. It runs in the top frame only, after `guard.js`, and
 - **`scan()`**: up to 4 rounds, because closing a modal often reveals its backdrop or a cookie bar.
   In learn mode it only reports new popups (`overlaySeen`). Each closed popup is logged
   immediately (`overlayClosed`), then one notice is shown with **Undo** and **Never on this site**.
-- **When it scans**: in close mode, a `MutationObserver` (at most every 600 ms); in every mode,
-  timed checks from 0.8 s to 60 s after load, on scroll, and when the mouse leaves the page (exit
-  intent). It also answers `closeOverlaysNow` from the toolbar popup, which skips the "opened by
-  you" check.
+- **`players()`**: visible `<video>` and `<iframe>` elements of at least 200×120 px. In the top
+  frame, the 6 largest. In a frame, only its main content (a video filling 30% or more of the frame,
+  else such a nested frame, else the frame's own viewport).
+- **`findCovers()`**: for each player, `elementsFromPoint` at 5 points inside it. Everything painted
+  above the player there is traced up to its layer (`layerOf`: the highest ancestor that doesn't
+  also hold the player) and judged by `classifyCover()`:
+  `adframe` (another frame over a video inside a player frame, unless captcha/payment/sign-in or
+  the IMA ad-controls frame), `adlink` (a link layer to a site that is neither the frame's nor the
+  page's, covering enough of the player), `trap` (bare and invisible, covering 70% or more: over an
+  embedded frame always, over a video only with `z-index` ≥ 9999 or attached to `<body>` in a
+  frame). Layers with controls, media or a player-like class/id (`PLAYER_NAME`) return `null`.
+- **`onBlockedClick`**: proof from a blocked popup. From the element that opened it, climb while
+  the ancestors are bare; the outermost one that is positioned and lies over half the frame or 60%
+  of a player is the trap. Invisible: hidden at once. Visible: after the second time. Visible
+  links: never.
+- **Frames and the notice**: a frame can't show a notice, so the worker shows it in the page when
+  it receives `overlayClosed` from a frame. **Undo** is broadcast to every frame (`overlayUndo`).
+- **When it scans**: in close mode, a `MutationObserver` (at most every 600 ms, 1 s in frames); in
+  every mode, timed checks from 0.8 s to 60 s after load, on scroll, and when the mouse leaves the
+  page (exit intent). Not while a mouse button is held, so drag shields aren't judged. It also
+  answers `closeOverlaysNow`, which skips the "opened by you" check.
 """),
         ("extension/src/content/cosmetic.js", """\
 Defines `self.StrictCosmetic`, the list of CSS selectors `guard.js` hides. It is kept narrow on
@@ -378,8 +413,8 @@ Edit the `.txt` files, then run `node tools/build-rules.mjs` to regenerate the J
   effect on the next page load.
 - **Auto-close on-screen popups**: on adds the site to `overlaySites` and removes it from
   `overlayNever`; off does the opposite, so learning won't turn it back on.
-- **Close popups on this page now** sends `closeOverlaysNow` to the page. If anything was closed
-  and the mode is `auto`, the site is added to `overlaySites`.
+- **Close popups on this page now** sends `closeOverlays` to the worker, which asks every frame of
+  the tab. If anything was closed and the mode is `auto`, the site is added to `overlaySites`.
 - It re-renders on every `storage.onChanged`, so it stays live while open.
 """),
         ("extension/pages/options.html", "Settings, with four tabs selected by URL hash (`#protection`, `#lists`, `#history`, `#how`). Section ids are `sec-…` so the browser doesn't scroll to them."),
@@ -417,15 +452,17 @@ One HTTP server that plays several sites. Chrome is started with `--host-resolve
 `site-a.test`, `site-b.test`, `site-c.test`, `doubleclick.net` and `www.google-analytics.com` all
 resolve to `127.0.0.1`, and the server routes on the `Host` header. `site-a.test/` has one button
 or link for each popup trick. `OVERLAY_PAGES` (`/overlay`, `/overlay-plain`, `/user-modal`, `/trap`,
-`/dialog`) imitate heavy-popup sites on any `*.test` host. `static.site-c.test/widget.js` is a
+`/dialog`) imitate heavy-popup sites on any `*.test` host. `/embed-host` embeds `/player` (a video
+with its own click layer and control bar, plus per-case layers on top) or `/wrapper` (a frame
+whose player is one frame deeper) from another site. `static.site-c.test/widget.js` is a
 third-party script blocked only by your custom list; its name avoids "ad" so a browser's own
 blocker (e.g. Brave Shields) can't interfere.
 """),
         ("test/run.mjs", """\
 Starts Chromium with the unpacked extension (`enableExtensions`), waits for the service worker to
-finish installing, then runs 40 cases in groups: network and cosmetic, the same-site rule, popups,
-memory, Balanced mode, lists, on-screen popups. `deepText()` reads closed shadow roots through the DevTools protocol
-to check the toast. `setConfig()` writes storage from inside the worker, then waits for
+finish installing, then runs 48 cases in groups: network and cosmetic, the same-site rule, popups,
+memory, Balanced mode, lists, on-screen popups, embedded players. `deepText()` reads closed shadow
+roots through the DevTools protocol to check the toast, and `clickInShadow()` presses its buttons. `setConfig()` writes storage from inside the worker, then waits for
 `rulesChain` so the network rules are updated before the next page loads. A
 240-second deadline kills the run if the browser hangs.
 """),

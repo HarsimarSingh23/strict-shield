@@ -181,7 +181,7 @@
           <li><b>Cosmetic filtering.</b>
             A style sheet hides common ad containers so you don't see empty boxes.</li>
           <li><b>On-screen popups.</b>
-            Every few seconds, and whenever the page changes, it checks what sits on top of the middle and edges of the screen. A fixed layer covering the page, a dimmed backdrop, a cookie or newsletter bar, or an invisible click trap counts as a popup, unless it appeared right after you clicked something. It presses the popup's own close / "No thanks" / "Reject all" button, then Escape, then hides it, and gives scrolling back. A site that shows 3 such popups is remembered and handled automatically from then on.</li>
+            Every few seconds, and whenever the page changes, it checks what sits on top of the middle and edges of the screen. A fixed layer covering the page, a dimmed backdrop, a cookie or newsletter bar, or an invisible click trap counts as a popup, unless it appeared right after you clicked something. It presses the popup's own close / "No thanks" / "Reject all" button, then Escape, then hides it, and gives scrolling back. A site that shows 3 such popups is remembered and handled automatically from then on. The same check runs inside embedded frames: on top of a video or an embedded player, invisible click layers, ad frames and link layers to other sites are removed, and the video and its controls are left. A layer whose click tried to open a popup that was blocked is removed right away, on any site.</li>
           <li><b>Memory.</b>
             Every blocked popup, redirect and link is saved in the extension's local storage with how many times it happened. Your allow and block lists are saved there too.</li>
         </ol>

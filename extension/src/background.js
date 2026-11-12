@@ -257,6 +257,16 @@ function toast(tabId, payload) {
   chrome.tabs.sendMessage(tabId, { type: 'toast', ...payload }, { frameId: 0 }).catch(() => {});
 }
 
+// Toolbar button: close on-screen popups in every frame of a tab, right now.
+async function closeOverlaysInTab(tabId) {
+  const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null) || [];
+  const answers = await Promise.all(frames.map((f) =>
+    chrome.tabs.sendMessage(tabId, { type: 'closeOverlaysNow' }, { frameId: f.frameId })
+      .then((r) => ({ frameId: f.frameId, closed: (r && r.closed) || 0 }), () => null)));
+  const ok = answers.filter(Boolean);
+  return { reached: ok.some((a) => a.frameId === 0), closed: ok.reduce((n, a) => n + a.closed, 0) };
+}
+
 /* ------------------------------------------------------------ the guards */
 
 function closePopup(tabId, opener, url, reason) {
@@ -579,8 +589,20 @@ async function handleMessage(msg, sender) {
     }
     case 'overlayClosed': {
       const times = Math.max(1, Math.min(10, msg.count | 0));
-      if (S.isWeb(pageUrl)) logBlock({ kind: 'overlay', url: pageUrl, fromUrl: pageUrl, tabId, times });
+      // Closed inside an embedded frame: log that frame's address, and show
+      // the notice in the page itself (a frame is too small for one).
+      const inFrame = !!sender.frameId;
+      const where = inFrame && S.isWeb(sender.url) ? sender.url : pageUrl;
+      if (S.isWeb(pageUrl)) logBlock({ kind: 'overlay', url: where, fromUrl: pageUrl, tabId, times });
       bumpBadge(tabId, times);
+      if (inFrame) {
+        toast(tabId, { kind: 'overlay', title: 'Popup closed', text: 'Removed a popup layer from an embedded player on this page.' });
+      }
+      return { ok: true };
+    }
+    case 'overlayUndo': {
+      // Every frame of this tab puts back what it closed.
+      if (tabId >= 0) chrome.tabs.sendMessage(tabId, { type: 'overlayUndo' }).catch(() => {});
       return { ok: true };
     }
     case 'overlayPref': {
@@ -639,6 +661,9 @@ async function handleMessage(msg, sender) {
         else if (msg.op === 'set') l[msg.list] = values;
       });
       return { ok: true, lists };
+    }
+    case 'closeOverlays': {
+      return { ok: true, ...(await closeOverlaysInTab(msg.tabId)) };
     }
     case 'clearLog': {
       await chrome.storage.local.set({ log: [], stats: { since: Date.now() } });

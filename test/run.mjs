@@ -475,6 +475,111 @@ await test('"every site" mode closes popups on any site', async (page) => {
 });
 await setConfig({ settings: { overlayMode: 'auto' }, lists: { overlaySites: [], overlayNever: [] } });
 
+console.log('\nEmbedded players (frames)');
+await inWorker(() => chrome.storage.local.remove('overlayCounts'));
+const frameOf = async (page, part) => {
+  for (let i = 0; i < 50; i++) {
+    const f = page.frames().find((x) => x.url().includes(part));
+    if (f) return f;
+    await sleep(100);
+  }
+  throw new Error(`no frame with ${part}`);
+};
+const shownInFrame = (frame, id) => frame.evaluate((i) => {
+  const e = document.getElementById(i);
+  return !!e && e.isConnected && getComputedStyle(e).display !== 'none';
+}, id);
+const waitShownInFrame = async (frame, id, want, ms = 6000) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await shownInFrame(frame, id) === want) return;
+    await sleep(100);
+  }
+  throw new Error(`#${id} is still ${want ? 'hidden' : 'shown'} in the frame`);
+};
+const COVERS = ['trap', 'overframe', 'overlink'];
+
+await test('popups over a video inside a frame count for the page\'s site and are removed once it is learned', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  for (const id of COVERS) await waitShownInFrame(frame, id, false);
+  const { lists, log } = await overlayState();
+  assert(lists.overlaySites.includes('site-a.test'), `not learned: ${lists.overlaySites}`);
+  const e = log.find((x) => x.kind === 'overlay' && x.url.includes('/player') && x.fromSite === 'site-a.test');
+  assert(e, 'frame closure not in the history');
+});
+
+await test('the video, its controls and its own click layer stay and work', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  for (const id of COVERS) await waitShownInFrame(frame, id, false);
+  for (const id of ['v', 'bar', 'tap']) assert(await shownInFrame(frame, id), `#${id} was hidden`);
+  await frame.click('#tap');
+  assert(await frame.evaluate(() => window.__toggled) === 1, 'click did not reach the player');
+});
+
+await test('the page shows the notice for a frame, and Undo puts the layers back', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  await waitShownInFrame(frame, 'trap', false);
+  await sleep(400);
+  assert((await deepText(page)).includes('Popup closed'), 'no notice in the page');
+  await clickInShadow(page, 'Undo');
+  await waitShownInFrame(frame, 'trap', true);
+});
+
+await test('invisible layer over an embedded frame, in the page itself, is removed', async (page) => {
+  await load(page, A + '/embed-host?case=none&top=trap');
+  await page.waitForFunction(() => getComputedStyle(document.getElementById('toptrap')).display === 'none', { timeout: 6000 });
+  assert(await page.evaluate(() => getComputedStyle(document.getElementById('player')).display) !== 'none', 'the player frame was hidden');
+});
+
+await test('wrapper frame: invisible layer over the inner player frame is removed, the inner player stays', async (page) => {
+  await load(page, A + '/embed-host?frame=wrapper');
+  const wrapper = await frameOf(page, '/wrapper');
+  await waitShownInFrame(wrapper, 'wraptrap', false);
+  assert(await shownInFrame(wrapper, 'inner'), 'the inner player frame was hidden');
+  const inner = await frameOf(page, '/player');
+  for (const id of ['v', 'bar', 'tap']) assert(await shownInFrame(inner, id), `#${id} was hidden`);
+});
+
+await test('a layer whose click opened a blocked popup is removed, even on a site not learned', async (page) => {
+  await load(page, B + '/embed-host?case=soft');
+  const frame = await frameOf(page, '/player');
+  await sleep(1200);
+  assert(await shownInFrame(frame, 'softtrap'), 'removed before it proved to be a trap');
+  await frame.click('#softtrap');
+  await noTabWith('/x-soft', 800);
+  await waitShownInFrame(frame, 'softtrap', false);
+  await frame.click('#tap');
+  assert(await frame.evaluate(() => window.__toggled) === 1, 'next click did not reach the player');
+});
+
+await test('a visible play button that opens a popup on the first click only is kept', async (page) => {
+  await load(page, B + '/embed-host?case=dual');
+  const frame = await frameOf(page, '/player');
+  await frame.click('#bigplay');
+  await noTabWith('/x-dual', 800);
+  assert(await shownInFrame(frame, 'bigplay'), 'play button removed after one click');
+  await frame.click('#bigplay');
+  assert(await frame.evaluate(() => window.__played) === 1, 'second click did not play');
+});
+
+await setConfig({ settings: { overlayMode: 'off' } });
+await test('"Close popups on this page now" also reaches embedded players', async (page) => {
+  await load(page, A + '/embed-host?case=covers');
+  const frame = await frameOf(page, '/player');
+  await sleep(1500);
+  assert(await shownInFrame(frame, 'trap'), 'closed while auto-close is off');
+  const res = await inWorker(async (prefix) => {
+    const tab = (await chrome.tabs.query({})).find((t) => (t.url || '').startsWith(prefix));
+    return closeOverlaysInTab(tab.id);
+  }, A + '/embed-host');
+  assert(res.reached && res.closed >= 3, JSON.stringify(res));
+  for (const id of COVERS) assert(!(await shownInFrame(frame, id)), `#${id} is still there`);
+});
+await setConfig({ settings: { overlayMode: 'auto' }, lists: { overlaySites: [], overlayNever: [] } });
+
 clearTimeout(deadline);
 await Promise.race([browser.close(), sleep(5000)]);
 browser.process()?.kill('SIGKILL');

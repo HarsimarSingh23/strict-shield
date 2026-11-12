@@ -4,7 +4,8 @@
  *   - cancels clicks on links that would open another site
  *   - hides ad containers (cosmetic filtering)
  *   - shows the "blocked" toast in the top frame
- *   - exposes self.StrictShieldContent (config + toast) to overlay.js
+ *   - exposes self.StrictShieldContent (config, toast, blocked-click evidence)
+ *     to overlay.js, in every frame
  */
 (() => {
   'use strict';
@@ -45,12 +46,22 @@
     return S.decide({ fromUrl: topUrl, toUrl: target, kind: 'popup', settings, lists }).allow;
   }
 
+  // overlay.js listens here: (element, isLink) for every click whose popup was blocked.
+  const blockedClickListeners = [];
+  function notifyBlockedClick(el, isLink) {
+    for (const cb of blockedClickListeners) { try { cb(el, isLink); } catch { /* listener bug */ } }
+  }
+
   window.addEventListener(ASK, (e) => {
     let req;
     try { req = JSON.parse(e.detail); } catch { return; }
     const allow = popupAllowed(req.url);
     if (!allow) report('popup', req.url, true);
     window.dispatchEvent(new CustomEvent(ANSWER, { detail: allow ? 'allow' : 'block' }));
+    // guard-main.js sends the question from the element whose own click
+    // listener tried to open the popup: evidence that it is a click trap.
+    const el = e.composedPath ? e.composedPath()[0] : e.target;
+    if (!allow && el && el.nodeType === 1) notifyBlockedClick(el, false);
   }, true);
 
   /* ---------------------------------------------------------- link clicks */
@@ -117,6 +128,7 @@
     }
     e.preventDefault();
     report(newTab ? 'popup' : 'link', href, newTab);
+    notifyBlockedClick(a, true);
   }
   window.addEventListener('click', onClick, true);
   window.addEventListener('auxclick', onClick, true);
@@ -204,6 +216,20 @@
     });
   } catch { /* extension reloaded */ }
 
+  // For overlay.js, which runs next in this same isolated world.
+  const api = {
+    isTop,
+    topUrl,
+    topSite,
+    send,
+    config: () => ({ settings, lists, loaded: configLoaded }),
+    onConfig: (cb) => { configListeners.push(cb); },
+    onBlockedClick: (cb) => { blockedClickListeners.push(cb); },
+    toast: () => {},      // only the top frame shows notices
+    isOwn: () => false
+  };
+  self.StrictShieldContent = api;
+
   /* ---------------------------------------------------------------- toast */
 
   if (!isTop) return;
@@ -252,13 +278,14 @@
     return n;
   }
 
-  // msg: { kind, url } from the worker, or { kind, title, text, actions: [{ label, run }] }
-  // from overlay.js (same world, so actions can be functions).
+  // msg: { kind, url } for something blocked, or { kind: 'overlay', title, text }
+  // for on-screen popups closed here or (relayed by the worker) in a frame.
   function showToast(msg) {
     ensureHost();
     const url = String(msg.url || '');
     const web = S.isWeb(url);
-    const site = msg.actions ? topSite : (web ? S.hostOf(url) : url.split(':')[0] + ':');
+    const overlay = msg.kind === 'overlay';
+    const site = overlay ? topSite : (web ? S.hostOf(url) : url.split(':')[0] + ':');
     const key = `${msg.kind}|${site}`;
     const existing = rows.get(key);
     if (existing) {
@@ -289,7 +316,11 @@
       line.append(document.createTextNode(web ? 'This page tried to open ' : 'This page tried to open a '));
       line.append(el('b', '', site));
     }
-    const actions = msg.actions || (web ? [
+    const actions = overlay ? [
+      // The worker tells every frame of this tab to put back what it closed.
+      { label: 'Undo', run: () => send({ type: 'overlayUndo' }) },
+      { label: `Never on ${topSite}`, run: () => { send({ type: 'overlayUndo' }); send({ type: 'overlayPref', pref: 'never' }); } }
+    ] : (web ? [
       { label: 'Open once', run: () => send({ type: 'openOnce', url, newTab: msg.kind === 'popup' }) },
       { label: `Always allow ${topSite}`, run: () => send({ type: 'allowSource', url, newTab: msg.kind === 'popup' }) }
     ] : []);
@@ -340,14 +371,6 @@
     });
   } catch { /* extension reloaded */ }
 
-  // For overlay.js, which runs next in this same isolated world (top frame only).
-  self.StrictShieldContent = Object.freeze({
-    topUrl,
-    topSite,
-    send,
-    config: () => ({ settings, lists, loaded: configLoaded }),
-    onConfig: (cb) => { configListeners.push(cb); },
-    toast: (msg) => whenBody(() => showToast(msg)),
-    isOwn: (node) => !!host && node === host
-  });
+  api.toast = (msg) => whenBody(() => showToast(msg));
+  api.isOwn = (node) => !!host && node === host;
 })();
