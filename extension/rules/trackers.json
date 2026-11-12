@@ -1,0 +1,135 @@
+[
+ {
+  "id": 1,
+  "priority": 1,
+  "action": {
+   "type": "block"
+  },
+  "condition": {
+   "requestDomains": [
+    "2o7.net",
+    "addthis.com",
+    "adsymptotic.com",
+    "agkn.com",
+    "analytics.tiktok.com",
+    "analytics.twitter.com",
+    "api-js.mixpanel.com",
+    "api.amplitude.com",
+    "api.segment.io",
+    "api2.amplitude.com",
+    "bat.bing.com",
+    "bluekai.com",
+    "bounceexchange.com",
+    "c.statcounter.com",
+    "cdn.amplitude.com",
+    "cdn.segment.com",
+    "chartbeat.com",
+    "chartbeat.net",
+    "clarity.ms",
+    "cnzz.com",
+    "crazyegg.com",
+    "crwdcntrl.net",
+    "ct.pinterest.com",
+    "demdex.net",
+    "everesttech.net",
+    "exelator.com",
+    "eyeota.net",
+    "fullstory.com",
+    "google-analytics.com",
+    "googletagmanager.com",
+    "heapanalytics.com",
+    "histats.com",
+    "hm.baidu.com",
+    "hotjar.com",
+    "hotjar.io",
+    "hs-analytics.net",
+    "id5-sync.com",
+    "imrworldwide.com",
+    "in.getclicky.com",
+    "js-agent.newrelic.com",
+    "krxd.net",
+    "liadm.com",
+    "luckyorange.com",
+    "luckyorange.net",
+    "mathtag.com",
+    "mc.yandex.com",
+    "mc.yandex.ru",
+    "mouseflow.com",
+    "munchkin.marketo.net",
+    "mxpnl.com",
+    "nr-data.net",
+    "omtrdc.net",
+    "pi.pardot.com",
+    "pippio.com",
+    "quantcount.com",
+    "quantserve.com",
+    "rlcdn.com",
+    "scorecardresearch.com",
+    "sharethis.com",
+    "snap.licdn.com",
+    "static.cloudflareinsights.com",
+    "static.getclicky.com",
+    "tapad.com",
+    "tr.snapchat.com",
+    "track.hubspot.com"
+   ]
+  }
+ },
+ {
+  "id": 2,
+  "priority": 1,
+  "action": {
+   "type": "block"
+  },
+  "condition": {
+   "urlFilter": "||analytics.google.com/g/collect",
+   "isUrlFilterCaseSensitive": false
+  }
+ },
+ {
+  "id": 3,
+  "priority": 1,
+  "action": {
+   "type": "block"
+  },
+  "condition": {
+   "urlFilter": "||connect.facebook.net/*/fbevents.js",
+   "isUrlFilterCaseSensitive": false
+  }
+ },
+ {
+  "id": 4,
+  "priority": 1,
+  "action": {
+   "type": "block"
+  },
+  "condition": {
+   "urlFilter": "||facebook.com/tr^",
+   "isUrlFilterCaseSensitive": false
+  }
+ },
+ {
+  "id": 5,
+  "priority": 1,
+  "action": {
+   "type": "block"
+  },
+  "condition": {
+   "urlFilter": "||redditstatic.com/ads/",
+   "isUrlFilterCaseSensitive": false
+  }
+ },
+ {
+  "id": 6,
+  "priority": 1,
+  "action": {
+   "type": "block"
+  },
+  "condition": {
+   "domainType": "thirdParty",
+   "resourceTypes": [
+    "ping"
+   ]
+  }
+ }
+]

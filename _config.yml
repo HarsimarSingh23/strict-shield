@@ -1,0 +1,16 @@
+# GitHub Pages settings. Only README.md (home page) and PRIVACY.md are published as web pages;
+# the privacy policy is served at /strict-shield/PRIVACY.html for the Chrome Web Store listing.
+title: Strict Shield
+description: Strict ad, tracker and popup blocker for Chrome
+exclude:
+  - NOTES_WITH_CODE.md
+  - extension
+  - filters
+  - store
+  - test
+  - tools
+  - dist
+  - node_modules
+  - package.json
+  - package-lock.json
+  - LICENSE

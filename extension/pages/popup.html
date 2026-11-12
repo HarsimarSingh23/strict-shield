@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Strict Shield</title>
+  <link rel="stylesheet" href="common.css">
+  <style>
+    body { width: 340px; padding: 14px; }
+    header { margin-bottom: 12px; }
+    header img { width: 24px; height: 24px; }
+    header h1 { font-size: 15px; }
+    .site { font-weight: 600; font-size: 15px; word-break: break-all; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+    .stat { padding: 10px 12px; }
+    .stat b { display: block; font-size: 22px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .stat span { font-size: 12px; color: var(--muted); }
+    .controls { padding: 4px 12px; }
+    .controls .row { padding: 9px 0; }
+    .controls .row + .row { border-top: 1px solid var(--line); }
+    .controls small { display: block; color: var(--muted); font-size: 12px; }
+    .zap { margin-top: 10px; display: grid; gap: 6px; }
+    .zap button { width: 100%; }
+    .zap span { font-size: 12px; text-align: center; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+    li .u { word-break: break-all; }
+    .empty { color: var(--muted); font-size: 12.5px; padding: 6px 0; }
+    footer { margin-top: 12px; display: flex; justify-content: space-between; }
+    .unsupported { padding: 14px; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header class="row">
+    <img src="../icons/icon48.png" alt="">
+    <h1 class="grow">Strict Shield</h1>
+    <button class="link" id="openOptions">Settings</button>
+  </header>
+
+  <div id="unsupported" class="card unsupported" hidden>Strict Shield doesn't run on browser pages like this one.</div>
+
+  <main id="main" hidden>
+    <div class="row">
+      <div class="grow site" id="site"></div>
+      <span class="pill" id="status"></span>
+    </div>
+
+    <div class="stats">
+      <div class="card stat"><b id="netCount">–</b><span>requests blocked on this tab</span></div>
+      <div class="card stat"><b id="pageCount">0</b><span>popups, redirects &amp; overlays blocked here</span></div>
+    </div>
+
+    <div class="card controls">
+      <label class="row">
+        <div class="grow">Protection on this site<small>Turn off if the site is broken</small></div>
+        <span class="switch"><input type="checkbox" id="protect"><span></span></span>
+      </label>
+      <label class="row">
+        <div class="grow">Let this site open other sites<small>Allows its popups and outbound redirects</small></div>
+        <span class="switch"><input type="checkbox" id="outbound"><span></span></span>
+      </label>
+      <label class="row">
+        <div class="grow">Auto-close on-screen popups<small id="overlayHint"></small></div>
+        <span class="switch"><input type="checkbox" id="overlay"><span></span></span>
+      </label>
+      <div class="row">
+        <div class="grow">Links to other sites<small id="modeHint"></small></div>
+        <div class="seg" id="mode">
+          <button data-mode="strict">Strict</button>
+          <button data-mode="balanced">Balanced</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="zap">
+      <button id="zap">Close popups on this page now</button>
+      <span class="muted" id="zapResult" role="status"></span>
+    </div>
+
+    <h2>Recently blocked here</h2>
+    <ul id="recent"></ul>
+  </main>
+
+  <footer>
+    <button class="link" id="openHistory">All blocked pages</button>
+    <span class="muted" id="version"></span>
+  </footer>
+  <script src="../src/lib/site.js"></script>
+  <script src="ui.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

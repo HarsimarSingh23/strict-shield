@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "Strict Shield: Ad & Popup Blocker",
+  "short_name": "Strict Shield",
+  "version": "1.0.0",
+  "description": "Strict ad, tracker and popup blocker. Pages can only open their own site; cross-site popups and redirects are blocked.",
+  "minimum_chrome_version": "116",
+  "homepage_url": "https://github.com/HarsimarSingh23/strict-shield",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Strict Shield",
+    "default_popup": "pages/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "options_page": "pages/options.html",
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "permissions": [
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "storage",
+    "webNavigation",
+    "webRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "ads", "enabled": true, "path": "rules/ads.json" },
+      { "id": "trackers", "enabled": true, "path": "rules/trackers.json" }
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/lib/site.js", "src/content/cosmetic.js", "src/content/guard.js", "src/content/overlay.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/guard-main.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["pages/blocked.html", "pages/blocked.js", "pages/blocked.css", "pages/common.css"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blocked by Strict Shield</title>
+  <link rel="stylesheet" href="common.css">
+  <link rel="stylesheet" href="blocked.css">
+</head>
+<body>
+  <main class="card box">
+    <img src="../icons/icon128.png" alt="" class="logo">
+    <h1 id="title">This page tried to send you to another site</h1>
+    <p class="muted" id="explain"></p>
+
+    <dl class="route">
+      <div id="fromRow"><dt>From</dt><dd><span class="host" id="fromHost"></span><code id="fromUrl"></code></dd></div>
+      <div><dt>To</dt><dd><span class="host" id="toHost"></span><code id="toUrl"></code></dd></div>
+    </dl>
+    <p class="seen" id="seen" hidden></p>
+
+    <div class="actions">
+      <button class="primary" id="back">Go back</button>
+      <button id="continue">Continue once</button>
+    </div>
+    <div class="more" id="more">
+      <button class="link" id="allowSource"></button>
+      <button class="link" id="trustDest"></button>
+    </div>
+    <p class="note muted" id="note">If this happened after you submitted a form (like a login or payment), choose "Always allow" and submit it again.</p>
+  </main>
+  <script src="../src/lib/site.js"></script>
+  <script src="blocked.js"></script>
+</body>
+</html>

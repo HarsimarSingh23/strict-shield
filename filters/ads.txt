@@ -1,0 +1,117 @@
+# Ad servers, ad exchanges, popup/popunder and native-ad networks.
+# One domain per line; subdomains are blocked too. Lines starting with # are comments.
+# Path rules use the declarativeNetRequest urlFilter syntax and start with "||" or "/".
+# Rebuild after editing:  node tools/build-rules.mjs
+
+# Google
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+googletagservices.com
+adservice.google.com
+adservice.google.co.in
+adservice.google.co.uk
+fundingchoicesmessages.google.com
+2mdn.net
+
+# Exchanges / SSPs / DSPs
+adnxs.com
+adsrvr.org
+adform.net
+adroll.com
+amazon-adsystem.com
+bidswitch.net
+casalemedia.com
+contextweb.com
+criteo.com
+criteo.net
+indexww.com
+openx.net
+pubmatic.com
+rubiconproject.com
+smartadserver.com
+spotxchange.com
+spotx.tv
+teads.tv
+tribalfusion.com
+yieldmo.com
+33across.com
+sharethrough.com
+sovrn.com
+lijit.com
+gumgum.com
+media.net
+yieldlab.net
+stickyadstv.com
+smaato.net
+adtechus.com
+advertising.com
+serving-sys.com
+flashtalking.com
+innovid.com
+zedo.com
+districtm.io
+an.facebook.com
+ads.linkedin.com
+ads-twitter.com
+ads.yahoo.com
+inmobi.com
+applovin.com
+unityads.unity3d.com
+vungle.com
+chartboost.com
+adcolony.com
+
+# Ad verification / viewability
+moatads.com
+doubleverify.com
+adsafeprotected.com
+
+# Native / "around the web" widgets
+taboola.com
+outbrain.com
+zemanta.com
+revcontent.com
+mgid.com
+adblade.com
+content.ad
+
+# Popup, popunder and push-ad networks
+propellerads.com
+propellerclick.com
+monetag.com
+popads.net
+popcash.net
+adsterra.com
+exoclick.com
+exosrv.com
+clickadu.com
+hilltopads.net
+adcash.com
+ad-maven.com
+galaksion.com
+trafficstars.com
+tsyndicate.com
+juicyads.com
+plugrush.com
+adxpansion.com
+ero-advertising.com
+trafficjunky.net
+trafficjunky.com
+trafficfactory.biz
+adskeeper.com
+adskeeper.co.uk
+bidvertiser.com
+infolinks.com
+chitika.com
+yllix.com
+a-ads.com
+coinzilla.com
+coinzilla.io
+bitmedia.io
+buysellads.com
+carbonads.net
+
+# Header-bidding scripts, wherever they are hosted
+/prebid.js
+/prebid.min.js

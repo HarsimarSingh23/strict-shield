@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Strict Shield settings</title>
+  <link rel="stylesheet" href="common.css">
+  <style>
+    .wrap { max-width: 880px; margin: 0 auto; padding: 24px 16px 64px; }
+    header.top { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    header.top img { width: 36px; height: 36px; }
+    header.top h1 { font-size: 22px; }
+    nav { display: flex; gap: 18px; flex-wrap: wrap; margin: 12px 0 24px; border-bottom: 1px solid var(--line); }
+    nav a { text-decoration: none; color: var(--muted); padding: 8px 0; border-bottom: 2px solid transparent; }
+    nav a.active { color: var(--text); border-bottom-color: var(--brand); }
+    section { display: none; }
+    section.active { display: block; }
+    h2 { font-size: 16px; margin: 0 0 4px; }
+    .lead { color: var(--muted); margin: 0 0 16px; }
+    .card { padding: 4px 18px; margin-bottom: 18px; }
+    .opt { display: flex; gap: 14px; align-items: flex-start; padding: 14px 0; }
+    .opt + .opt { border-top: 1px solid var(--line); }
+    .opt .grow { flex: 1; }
+    .opt b { display: block; font-weight: 600; }
+    .opt p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    .radio { display: grid; gap: 10px; margin-top: 10px; }
+    .radio label { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+    .radio input { margin-top: 4px; accent-color: var(--brand); }
+    .radio span { color: var(--muted); font-size: 13px; }
+    .radio strong { color: var(--text); font-weight: 600; }
+
+    .list { padding: 16px 18px; }
+    .list h3 { font-size: 14px; }
+    .list p { margin: 2px 0 10px; color: var(--muted); font-size: 13px; }
+    .add { display: flex; gap: 8px; }
+    .add input { flex: 1; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--chip); border-radius: 999px;
+      padding: 2px 4px 2px 10px; font-family: var(--mono); font-size: 12.5px; }
+    .chip button { border: 0; background: none; padding: 0 6px; color: var(--muted); font-size: 15px; line-height: 1; }
+    .chip button:hover { color: var(--brand); }
+    .chips .none { color: var(--muted); font-size: 13px; }
+
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .toolbar input { flex: 1; min-width: 160px; }
+    .summary { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .summary .card { margin: 0; padding: 10px 14px; flex: 1; min-width: 130px; }
+    .summary b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+    .summary span { color: var(--muted); font-size: 12px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+    td.url { word-break: break-all; min-width: 220px; }
+    td.url small { display: block; color: var(--muted); }
+    td.n { text-align: right; font-variant-numeric: tabular-nums; }
+    td.act { white-space: nowrap; }
+    td.act button { padding: 3px 8px; font-size: 12px; }
+    .empty { color: var(--muted); padding: 24px 10px; text-align: center; }
+    .more { text-align: center; margin-top: 12px; }
+
+    .how { padding: 18px; }
+    .how ol { padding-left: 20px; margin: 8px 0 0; }
+    .how li { margin-bottom: 10px; }
+    .how li b { display: block; }
+    .danger-zone { margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <img src="../icons/icon128.png" alt="">
+      <div>
+        <h1>Strict Shield</h1>
+        <div class="muted">A page may only open its own site. Everything else asks first.</div>
+      </div>
+    </header>
+
+    <nav>
+      <a href="#protection">Protection</a>
+      <a href="#lists">Allow &amp; block lists</a>
+      <a href="#history">Blocked history</a>
+      <a href="#how">How filtering works</a>
+    </nav>
+
+    <section id="sec-protection">
+      <div class="card">
+        <div class="opt">
+          <div class="grow"><b>Block ads</b><p>Stops requests to ad servers, popup networks and native-ad widgets.</p></div>
+          <span class="switch"><input type="checkbox" data-setting="blockAds"><span></span></span>
+        </div>
+        <div class="opt">
+          <div class="grow"><b>Block trackers</b><p>Stops analytics, session recording, tracking pixels and cross-site pings.</p></div>
+          <span class="switch"><input type="checkbox" data-setting="blockTrackers"><span></span></span>
+        </div>
+        <div class="opt">
+          <div class="grow"><b>Hide ad boxes</b><p>Hides leftover ad containers on the page (cosmetic filtering).</p></div>
+          <span class="switch"><input type="checkbox" data-setting="cosmetic"><span></span></span>
+        </div>
+        <div class="opt">
+          <div class="grow"><b>Block popups to other sites</b><p>Closes new tabs and windows a page opens to a different site, including popunders.</p></div>
+          <span class="switch"><input type="checkbox" data-setting="blockPopups"><span></span></span>
+        </div>
+        <div class="opt">
+          <div class="grow">
+            <b>On-screen popups</b>
+            <p>Newsletter boxes, cookie walls, "turn off your ad blocker" messages, notification prompts and invisible click-trap layers. Strict Shield presses their own close or "No thanks" / "Reject all" button (never Accept, Allow or Subscribe), or hides them, then gives scrolling back. Popups you open yourself are left alone.</p>
+            <div class="radio" id="overlayMode">
+              <label><input type="radio" name="overlayMode" value="auto"><div><strong>Auto</strong> <span>(default) — close them on sites that keep showing popups (learned after 3) and on sites you add.</span></div></label>
+              <label><input type="radio" name="overlayMode" value="everywhere"><div><strong>Every site</strong> <span>— close them everywhere except sites on your "never" list.</span></div></label>
+              <label><input type="radio" name="overlayMode" value="off"><div><strong>Off</strong> <span>— never close them by themselves. The toolbar button still works.</span></div></label>
+            </div>
+          </div>
+        </div>
+        <div class="opt">
+          <div class="grow">
+            <b>Links and redirects to other sites</b>
+            <div class="radio" id="navMode">
+              <label><input type="radio" name="navMode" value="strict"><div><strong>Strict</strong> <span>(default) — every link, redirect or form that leaves the site is stopped and asks you first.</span></div></label>
+              <label><input type="radio" name="navMode" value="balanced"><div><strong>Balanced</strong> <span>— links you click yourself open normally; automatic redirects and scripted navigation are still blocked.</span></div></label>
+              <label><input type="radio" name="navMode" value="off"><div><strong>Off</strong> <span>— only popups are blocked.</span></div></label>
+            </div>
+          </div>
+        </div>
+        <div class="opt">
+          <div class="grow"><b>Allow sign-in and payment providers</b><p>Lets "Sign in with Google/Microsoft/Apple", PayPal, Stripe, Razorpay, Paytm and similar open and send you back. Turn off to block them too.</p></div>
+          <span class="switch"><input type="checkbox" data-setting="trustProviders"><span></span></span>
+        </div>
+        <div class="opt">
+          <div class="grow"><b>Extra strict: block all third-party iframes</b><p>Removes every embedded frame from another site (videos, comment widgets, social embeds). Captcha and payment frames are kept. Expect some sites to break.</p></div>
+          <span class="switch"><input type="checkbox" data-setting="blockThirdPartyFrames"><span></span></span>
+        </div>
+      </div>
+      <div class="danger-zone row">
+        <button class="danger" id="reset">Reset all settings and lists</button>
+      </div>
+    </section>
+
+    <section id="sec-lists">
+      <p class="lead">Entries are site names like <code>example.com</code>; subdomains are included.</p>
+      <div id="listEditors"></div>
+    </section>
+
+    <section id="sec-history">
+      <p class="lead">Every popup, redirect and link Strict Shield stopped is kept in this browser (extension storage) until you clear it. Nothing is sent anywhere.</p>
+      <div class="summary" id="summary"></div>
+      <div class="toolbar">
+        <input type="search" id="q" placeholder="Filter by site or URL">
+        <select id="kind">
+          <option value="">All types</option>
+          <option value="popup">Popups</option>
+          <option value="navigation">Redirects</option>
+          <option value="link">Links</option>
+          <option value="blocklist">Blocklist</option>
+          <option value="overlay">On-screen popups</option>
+        </select>
+        <button id="export">Export JSON</button>
+        <button class="danger" id="clear">Clear history</button>
+      </div>
+      <div class="card table-wrap" style="padding:0">
+        <table>
+          <thead><tr><th>Last blocked</th><th>Type</th><th>Blocked URL</th><th>Times</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="more"><button id="more" hidden>Show more</button></div>
+    </section>
+
+    <section id="sec-how">
+      <div class="card how">
+        <h2>How Strict Shield filters a page</h2>
+        <ol>
+          <li><b>Network rules (before anything downloads).</b>
+            Chrome checks every request against the extension's block lists (declarativeNetRequest). Requests to ad and tracker domains are cancelled inside the browser, so the ad never loads. The lists are in <code>filters/ads.txt</code> and <code>filters/trackers.txt</code> in the source.</li>
+          <li><b>Popup guard (in the page).</b>
+            Pages open popups with <code>window.open()</code>, links with <code>target="_blank"</code>, hidden link clicks and form submits. A script that runs before the page's own scripts wraps those calls and cancels any that would open a different site. Same-site popups still work.</li>
+          <li><b>Popup backstop (in the browser).</b>
+            If a new tab still appears, the extension compares its address with the site of the tab that opened it. A different site means the tab is closed before it can load.</li>
+          <li><b>Navigation guard.</b>
+            When a page tries to send its own tab to another site (a redirect, a script, an ad frame, a link), the navigation is stopped and you stay on the page, with a notice to open it once or allow the site. If a redirect slips through, the tab goes back to where you were. Addresses you type, bookmarks and the back button are never blocked.</li>
+          <li><b>Cosmetic filtering.</b>
+            A style sheet hides common ad containers so you don't see empty boxes.</li>
+          <li><b>On-screen popups.</b>
+            Every few seconds, and whenever the page changes, it checks what sits on top of the middle and edges of the screen. A fixed layer covering the page, a dimmed backdrop, a cookie or newsletter bar, or an invisible click trap counts as a popup, unless it appeared right after you clicked something. It presses the popup's own close / "No thanks" / "Reject all" button, then Escape, then hides it, and gives scrolling back. A site that shows 3 such popups is remembered and handled automatically from then on.</li>
+          <li><b>Memory.</b>
+            Every blocked popup, redirect and link is saved in the extension's local storage with how many times it happened. Your allow and block lists are saved there too.</li>
+        </ol>
+        <p class="muted">"Same site" means the same registered domain: <code>mail.google.com</code> and <code>www.google.com</code> are one site; <code>google.com</code> and <code>youtube.com</code> are two.</p>
+      </div>
+    </section>
+  </div>
+  <script src="../src/lib/site.js"></script>
+  <script src="ui.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
